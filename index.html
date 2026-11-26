@@ -1,6 +1,153 @@
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
+<script id="mod-shard">
+/* ╔══════════════════════════════════════════════════════════════════╗
+   ║  الوحدة 26 (v110) — تقسيم البيانات على عدة مستندات                  ║
+   ║  كانت كل البيانات في مستند Firestore واحد (الحد 1 ميجابايت) —        ║
+   ║  ومع نمو السندات يتوقف الحفظ، وكان سجل التدقيق يُقصّ ليتسع المستند.   ║
+   ║  الآن: كل مجموعة كبيرة (> 48KB) تُحفظ في مستندات مستقلة               ║
+   ║  duroob/main__<المجموعة>__<n> (حتى ~600KB لكلٍّ منها)، ويبقى في      ║
+   ║  المستند الرئيسي فهرس _shards فقط. القراءة تعيد تجميعها تلقائياً،     ║
+   ║  فلا يتغير شيء في بقية النظام. لا يُعاد كتابة جزء لم يتغير.          ║
+   ╚══════════════════════════════════════════════════════════════════╝ */
+(function(global){
+'use strict';
+var MIN_KEY=48000;       /* مجموعة أكبر من هذا تُنقل إلى مستندات مستقلة */
+var PART=600000;         /* أقصى حجم لكل جزء (بايت) — تحت حد Firestore بهامش واسع */
+var SKIP={_ts:1,_wid:1,_shards:1,_gc:1,_BLACKLIST:1,_schema:1};
+var enc=(typeof TextEncoder!=='undefined')?new TextEncoder():null;
+function bytes(s){ if(enc) return enc.encode(s).length; return unescape(encodeURIComponent(s)).length; }
+function hash(s){ var h1=0x811c9dc5, h2=5381; for(var i=0;i<s.length;i++){ var c=s.charCodeAt(i); h1=Math.imul(h1^c,16777619); h2=((h2<<5)+h2+c)|0; } return (h1>>>0).toString(36)+'.'+(h2>>>0).toString(36)+'.'+s.length.toString(36); }
+
+/* تقسيم الحالة: { main, parts:[{key,i,items,h}], manifest } */
+function split(obj){
+  var main={}, parts=[], man={};
+  Object.keys(obj||{}).forEach(function(k){
+    var v=obj[k];
+    if(SKIP[k]||!Array.isArray(v)){ if(k!=='_shards'&&k!=='_gc') main[k]=v; return; }
+    var js=JSON.stringify(v), sz=bytes(js);
+    if(sz<MIN_KEY){ main[k]=v; return; }
+    /* تقطيع المصفوفة إلى أجزاء بحدود PART */
+    var chunks=[], cur=[], curSz=2;
+    for(var i=0;i<v.length;i++){ var s=bytes(JSON.stringify(v[i]===undefined?null:v[i]))+1; if(cur.length&&curSz+s>PART){ chunks.push(cur); cur=[]; curSz=2; } cur.push(v[i]); curSz+=s; }
+    if(cur.length||!chunks.length) chunks.push(cur);
+    var hs=chunks.map(function(c,ix){ var h=hash(JSON.stringify(c)); parts.push({key:k,i:ix,items:c,h:h}); return h; });
+    man[k]={n:chunks.length,h:hs,len:v.length};
+  });
+  if(Object.keys(man).length) main._shards=man;
+  return {main:main,parts:parts,manifest:man};
+}
+function mainBytes(obj){ try{ return bytes(JSON.stringify(split(obj).main)); }catch(e){ return 0; } }
+
+function wrap(mainRef,db,col,boxKey){
+  if(!mainRef||mainRef.__shard) return mainRef;
+  var cache={};                       /* key|i → {h,items} */
+  var lastMan=null, lastGc=[];        /* آخر فهرس معروف على الخادم + أجزاء متقاعدة بانتظار الحذف */
+  var GC_AFTER=15*60*1000;            /* الجزء المتقاعد يُحذف بعد 15 دقيقة — فلا يقرأ جهازٌ متأخر جزءاً محذوفاً */
+  /* كل جزء له اسم مشتق من محتواه، فلا يُكتب فوق جزء يقرؤه جهاز آخر أبداً */
+  function pid(h){ return String(h).replace(/[^a-z0-9]/gi,'').slice(0,14); }
+  function ref(k,i,h){ return db.collection(col).doc(boxKey+'__'+k+'__'+i+'_'+pid(h)); }
+  function del(r){ try{ if(typeof r.delete==='function') return Promise.resolve(r.delete()).catch(function(){});
+      if(r.url&&typeof fetch==='function') return fetch(r.url,{method:'DELETE',headers:(global.__fbAuthH?global.__fbAuthH():{})}).catch(function(){}); }catch(e){} return Promise.resolve(); }
+  function snapOf(data,src){ return {exists:true,id:src&&src.id,metadata:src&&src.metadata,ref:W,data:function(){ return data; },get:function(f){ return data[f]; }}; }
+  function assemble(snap,getter){
+    if(!snap||!snap.exists) return Promise.resolve(snap);
+    var d=snap.data()||{}, man=d._shards;
+    lastGc=Array.isArray(d._gc)?d._gc:[];
+    if(!man) { lastMan=null; if(!d._gc) return Promise.resolve(snap); }
+    lastMan=man||null;
+    var out={}; Object.keys(d).forEach(function(k){ if(k!=='_shards'&&k!=='_gc') out[k]=d[k]; });
+    if(!man) return Promise.resolve(snapOf(out,snap));
+    var jobs=[];
+    Object.keys(man).forEach(function(k){ var m=man[k], arr=new Array(m.n);
+      for(var i=0;i<m.n;i++)(function(i){ var ck=k+'|'+i, c=cache[ck];
+        if(c&&c.h===m.h[i]){ arr[i]=c.items; return; }
+        jobs.push((getter?getter(ref(k,i,m.h[i])):ref(k,i,m.h[i]).get()).then(function(ps){
+          if(!ps||!ps.exists) throw new Error('جزء البيانات مفقود: '+k+' #'+i);
+          var pd=ps.data()||{}; if(pd.h&&pd.h!==m.h[i]) throw new Error('جزء البيانات غير متطابق: '+k+' #'+i+' (يُعاد التحميل)');
+          var items=pd.items||[]; cache[ck]={h:m.h[i],items:items}; arr[i]=items; }));
+      })(i);
+      out[k]=arr; });
+    return Promise.all(jobs).then(function(){
+      Object.keys(man).forEach(function(k){ var all=[].concat.apply([],out[k]);
+        /* نسخة قديمة (قبل v110) قد تكتب المجموعة داخل المستند الرئيسي بجوار الفهرس —
+           نضمّ ما أضافته حتى لا يضيع سند أُصدر منها */
+        if(Array.isArray(d[k])&&d[k].length){ var seen={}; var idf=function(x){ return x&&typeof x==='object'?(x.id!=null?'i'+x.id:x.num!=null?'n'+x.num:x.u!=null?'u'+x.u:JSON.stringify(x)):JSON.stringify(x); };
+          all.forEach(function(x){ seen[idf(x)]=1; }); d[k].forEach(function(x){ if(!seen[idf(x)]){ all.push(x); seen[idf(x)]=1; } }); }
+        out[k]=all; });
+      return snapOf(out,snap);
+    });
+  }
+  /* الأجزاء التي تغيّرت فقط */
+  function changedParts(sp){ return sp.parts.filter(function(p){ var m=lastMan&&lastMan[p.key]; return !(m&&m.h&&m.h[p.i]===p.h); }); }
+  /* الأجزاء التي لم يعد الفهرس الجديد يشير إليها → قائمة الحذف المؤجَّل (_gc) في المستند الرئيسي */
+  function plan(sp){
+    var now=Date.now(), keep={}, gc=[], due=[];
+    sp.parts.forEach(function(p){ keep[p.key+'__'+p.i+'_'+pid(p.h)]=1; });
+    if(lastMan) Object.keys(lastMan).forEach(function(k){ var m=lastMan[k]; for(var i=0;i<m.n;i++){ var id=k+'__'+i+'_'+pid(m.h[i]); if(!keep[id]) gc.push({p:id,t:now}); } });
+    (lastGc||[]).forEach(function(g){ if(!g||!g.p||keep[g.p]) return; if(now-(g.t||0)>GC_AFTER) due.push(g.p); else if(!gc.some(function(x){return x.p===g.p;})) gc.push(g); });
+    if(gc.length) sp.main._gc=gc.slice(-400); else delete sp.main._gc;
+    return due;
+  }
+  function sweep(due){ (due||[]).forEach(function(id){ del(db.collection(col).doc(boxKey+'__'+id)); }); }
+  function remember(sp){ sp.parts.forEach(function(p){ cache[p.key+'|'+p.i]={h:p.h,items:p.items}; }); lastMan=sp.manifest&&Object.keys(sp.manifest).length?sp.manifest:null; lastGc=sp.main._gc||[]; }
+  function partDoc(p){ return {k:p.key,i:p.i,h:p.h,items:p.items,_ts:Date.now()}; }
+
+  var W={
+    __shard:true, __main:mainRef,
+    get:function(opts){ return mainRef.get(opts).then(function(s){ return assemble(s,function(r){ return r.get(opts).catch(function(){ return r.get(); }); }); }); },
+    set:function(obj,opts){
+      var sp=split(obj), ch=changedParts(sp), due=plan(sp);
+      /* الأجزاء أولاً ثم الفهرس — فلا يرى أي جهاز فهرساً يشير إلى جزء لم يُكتب بعد */
+      return Promise.all(ch.map(function(p){ return ref(p.key,p.i,p.h).set(partDoc(p)); }))
+        .then(function(){ return opts?mainRef.set(sp.main,opts):mainRef.set(sp.main); })
+        .then(function(r){ remember(sp); sweep(due); return r; });
+    },
+    update:function(patch){
+      var big=Object.keys(patch||{}).some(function(k){ return Array.isArray(patch[k])&&bytes(JSON.stringify(patch[k]))>=MIN_KEY; })||Object.keys(patch||{}).some(function(k){ return lastMan&&lastMan[k]; });
+      if(!big) return mainRef.update(patch);
+      return W.get().then(function(s){ var d=s&&s.exists?s.data():{}; return W.set(Object.assign({},d,patch)); });
+    },
+    onSnapshot:function(a,b,c){
+      var cb=typeof a==='function'?a:b, err=typeof a==='function'?b:c, opts=typeof a==='function'?null:a, seq=0;
+      var h=function(snap){ var my=++seq; assemble(snap).then(function(s){ if(my===seq) cb(s); }).catch(function(e){ console.warn('🧩 تجميع البيانات:',e&&e.message); if(my===seq){ cache={}; assemble(snap).then(function(s){ if(my===seq) cb(s); }).catch(function(e2){ if(err) err(e2); }); } }); };
+      return opts?mainRef.onSnapshot(opts,h,err):mainRef.onSnapshot(h,err);
+    },
+    /* للمعاملات: قراءة وكتابة عبر معاملة Firestore الحقيقية */
+    _txGet:function(tx){ return tx.get(mainRef).then(function(s){ return assemble(s,function(r){ return tx.get(r); }); }); },
+    _txSet:function(tx,obj){ var sp=split(obj), ch=changedParts(sp), due=plan(sp); ch.forEach(function(p){ tx.set(ref(p.key,p.i,p.h),partDoc(p)); }); tx.set(mainRef,sp.main); W._pending=[sp,due]; },
+    _commit:function(){ if(W._pending){ var x=W._pending; W._pending=null; remember(x[0]); sweep(x[1]); } },
+    _split:split
+  };
+  return W;
+}
+/* معاملات Firestore: tx.get(ROOT)/tx.set(ROOT) تعمل مع المستند المقسّم */
+function wrapTx(db){
+  if(!db||db.__shardTx||typeof db.runTransaction!=='function') return db;
+  var orig=db.runTransaction.bind(db), isRest=!!(global._usingRest||(db.constructor&&/Rest/.test(db.constructor.name||'')));
+  db.runTransaction=function(fn){
+    var used=[];
+    if(isRest){
+      /* REST: لا ذرّية على الخادم — نقرأ ثم نكتب الأجزاء ثم الفهرس */
+      var pending=null;
+      var tx={get:function(r){ return r&&r.__shard?r.get({source:'server'}):r.get(); },set:function(r,v){ pending=[r,v]; },update:function(r,v){ pending=[r,Object.assign({},v)]; }};
+      return Promise.resolve(fn(tx)).then(function(res){ if(!pending) return res; return pending[0].set(pending[1]).then(function(){ return res; }); });
+    }
+    return orig(function(rtx){
+      var tx={get:function(r){ if(r&&r.__shard){ used.push(r); return r._txGet(rtx); } return rtx.get(r); },
+              set:function(r,v,o){ if(r&&r.__shard){ r._txSet(rtx,v); return tx; } o?rtx.set(r,v,o):rtx.set(r,v); return tx; },
+              update:function(r,v){ rtx.update(r&&r.__shard?r.__main:r,v); return tx; },
+              delete:function(r){ rtx.delete(r&&r.__shard?r.__main:r); return tx; }};
+      return fn(tx);
+    }).then(function(res){ used.forEach(function(r){ r._commit(); }); return res; });
+  };
+  db.__shardTx=true; return db;
+}
+global.Shard={wrap:wrap,wrapTx:wrapTx,split:split,mainBytes:mainBytes,bytes:bytes,MIN_KEY:MIN_KEY,PART:PART};
+})(window);
+
+</script>
 <meta charset="UTF-8">
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
@@ -9913,6 +10060,7 @@ var FS_MAX=900000;   // هامش أمان تحت الحد الأقصى
 
 /* يقلّص المستند إذا اقترب من الحد: سجل التدقيق أولاً */
 function trimPayload(pl){
+  var payloadBytes=function(o){ return window.Shard?Shard.mainBytes(o):window.payloadBytes(o); };   /* 🧩 v110: يُقاس المستند الرئيسي فقط — المجموعات الكبيرة في مستندات مستقلة */
   var size=payloadBytes(pl);
   if(size<=FS_MAX)return pl;
   console.warn('📏 حجم المستند '+size+' بايت — يتجاوز الحد، جارٍ التقليص');
@@ -11350,6 +11498,7 @@ function initFirebase(){
         window._usingRest=true;
         _db=rdb;
         ROOT=_db.collection('duroob').doc(BOX_KEY);
+        if(window.Shard){ROOT=Shard.wrap(ROOT,_db,'duroob',BOX_KEY);}
         GUARD=_db.collection('duroob').doc('_guard');
         _fbReady=true;setSync('loading');
         _initListeners();
@@ -11368,6 +11517,7 @@ function initFirebase(){
     try{_db.settings({ignoreUndefinedProperties:true});}
     catch(e){console.warn('ignoreUndefinedProperties غير مدعوم:',e&&e.message);}
     ROOT=_db.collection('duroob').doc(BOX_KEY);
+    if(window.Shard){ROOT=Shard.wrap(ROOT,_db,'duroob',BOX_KEY);Shard.wrapTx(_db);}
     GUARD=_db.collection('duroob').doc('_guard');     // 🛡️ لا تلمسه النسخ القديمة
     _fbReady=true;setSync('loading');
     _initListeners();
@@ -17512,7 +17662,7 @@ global.Store=Store;
 
 /* ═════════════ 10) حجم البيانات في السحابة ═════════════ */
 function dataSize(){
-  try{ var b=(typeof payloadBytes==='function')?payloadBytes(collectState()):JSON.stringify(collectState()).length; var max=(typeof FS_MAX!=='undefined'?FS_MAX:1048576);
+  try{ var b=(window.Shard?Shard.mainBytes(collectState()):(typeof payloadBytes==='function')?payloadBytes(collectState()):JSON.stringify(collectState()).length);   /* 🧩 v110: المستند الرئيسي فقط */ var max=(typeof FS_MAX!=='undefined'?FS_MAX:1048576);
     return {bytes:b,max:max,pct:Math.round(b/max*100)}; }catch(e){ return {bytes:0,max:1,pct:0}; }
 }
 
