@@ -21512,7 +21512,7 @@ global.Sec={hash:hashPw,verify:verify,policy:policy,setPass:setPass,check:check,
 })(window);
 
 /* ╔══════════════════════════════════════════════════════════════════╗
-   ║  الوحدة 27 (v111–v112) — ترتيب الواجهة وتوحيد الهوية                                   ║
+   ║  الوحدة 27 (v111–v113) — الواجهة والهوية وتنبيه الإصدار وواتساب                                   ║
    ║  • حذف اسم الشركة ووصف النظام أسفل الشعار في القائمة الجانبية        ║
    ║  • النسخة الاحتياطية والاستيراد داخل «⚙️ الإدارة»                    ║
    ║  • زر «سند صرف» واحد فقط في صفحة السندات                             ║
@@ -21520,7 +21520,7 @@ global.Sec={hash:hashPw,verify:verify,policy:policy,setPass:setPass,check:check,
    ╚══════════════════════════════════════════════════════════════════╝ */
 (function(global){
 'use strict';
-var VER='v112';
+var VER='v113';
 global.DROOB_VER=VER;
 var css=''
  +'.sb-hd .sb-org,.sb-hd .sb-sub{display:none!important}'
@@ -21601,9 +21601,84 @@ function compactTop(){
 var SHORT={direct:'صرف مباشر',refund_invoiced:'مسترجع بفواتير',pending_not_delivered:'عهدة معلّقة',advanced_by_recipient:'مدفوع من المستلم',invoiced_not_delivered:'فواتير — لم يُسلَّم',disbursed_not_delivered:'مصروف — لم يُسلَّم',partial_settled:'تسوية جزئية',closed_final:'مغلقة نهائياً'};
 function shorts(){ try{ var L=(0,eval)('DOC_STATUS_LIST'); (L||[]).forEach(function(x){ if(SHORT[x.key]) x.short=SHORT[x.key]; }); }catch(e){} }
 setInterval(function(){ try{ compactTop(); }catch(e){} },1200);
+
+/* ═════════ v113 (1): تنبيه الإصدار الجديد ═════════
+   يقرأ ملف version.json الصغير من الموقع كل 5 دقائق وعند العودة للتبويب؛
+   إن نُشر إصدار أحدث يظهر شريط «يتوفر تحديث» بدل الاعتماد على Ctrl+Shift+R. */
+function verNum(v){ return parseInt(String(v||'').replace(/\D/g,''),10)||0; }
+function checkUpdate(){
+  if(location.protocol!=='https:'&&location.protocol!=='http:') return;
+  if(document.getElementById('upd-bar')) return;
+  fetch('version.json?t='+Date.now(),{cache:'no-store'}).then(function(r){ return r.ok?r.json():null; }).then(function(j){
+    if(!j||!j.v||verNum(j.v)<=verNum(VER)) return;
+    var b=document.createElement('div'); b.id='upd-bar';
+    b.style.cssText='position:fixed;top:0;left:0;right:0;z-index:100000;background:#1f3a7a;color:#fff;font-family:Tajawal,Arial;font-weight:800;font-size:14px;padding:10px 16px;display:flex;gap:12px;align-items:center;justify-content:center;box-shadow:0 4px 14px rgba(0,0,0,.25);direction:rtl';
+    b.innerHTML='🆕 يتوفر إصدار جديد من النظام ('+j.v+')'+(j.note?' — '+String(j.note).replace(/[<>]/g,''):'')
+      +'<button style="background:#cfa063;color:#1f3a7a;border:none;border-radius:8px;padding:6px 16px;font-family:inherit;font-weight:900;cursor:pointer">🔄 تحديث الآن</button>'
+      +'<button style="background:transparent;color:#fff;border:1px solid rgba(255,255,255,.5);border-radius:8px;padding:5px 10px;font-family:inherit;cursor:pointer">لاحقاً</button>';
+    var bs=b.querySelectorAll('button');
+    bs[0].onclick=function(){
+      var go=function(){ location.replace(location.pathname+'?v='+encodeURIComponent(j.v)+location.hash); };
+      try{ if(typeof cloudSave==='function'){ var r=cloudSave(true); if(r&&r.then){ r.then(go,go); setTimeout(go,4000); return; } } }catch(e){}
+      go(); };
+    bs[1].onclick=function(){ b.remove(); setTimeout(checkUpdate,30*60*1000); };
+    document.body.appendChild(b);
+  }).catch(function(){});
+}
+setInterval(checkUpdate,5*60*1000);
+document.addEventListener('visibilitychange',function(){ if(!document.hidden) checkUpdate(); });
+setTimeout(checkUpdate,8000);
+
+/* ═════════ v113 (3): إرسال السند للمستلم عبر واتساب ═════════ */
+function phoneOf(name){
+  try{ var key=String(name||'').trim(); if(!key) return '';
+    var V=(0,eval)('VENDORS')||[];
+    var hit=V.find(function(v){ return v&&!v.mergedInto&&String(v.name||'').trim()===key; });
+    return hit&&hit.phone?hit.phone:''; }catch(e){ return ''; }
+}
+function money(n){ try{ return (typeof fn==='function'?fn(n):Number(n).toFixed(2))+' ر.ق'; }catch(e){ return n+' ر.ق'; } }
+function waOpen(phone,text){
+  var ph=String(phone||'').replace(/[^\d+]/g,'').replace(/^\+/,'').replace(/^00/,''); if(ph&&ph.length===8) ph='974'+ph;
+  var u='https://wa.me/'+ph+'?text='+encodeURIComponent(text); var w=window.open(u,'_blank'); if(!w) location.href=u;
+}
+function waDoc(kind,num){
+  var isV=kind==='v', L=(0,eval)(isV?'VOUCHERS':'RECEIPTS')||[], d=L.find(function(x){ return x&&x.num===num; }); if(!d) return;
+  var name=isV?(d.recipient||d.rec):(d.from||d.payer), ph=phoneOf(name), prog='';
+  try{ prog=d.prog&&typeof gpn==='function'?gpn(d.prog):''; }catch(e){}
+  if(!ph){ ph=prompt('لا يوجد رقم جوال مسجّل لـ «'+(name||'المستلم')+'».\nأدخل رقم الواتساب (أو اتركه فارغاً لاختيار جهة الاتصال من واتساب):','')||''; }
+  var t='*شركة دروب للخدمات السياحية*\n'
+    +(isV?'سند صرف':'سند قبض')+' رقم: *'+d.num+'*\n'
+    +'التاريخ: '+(d.date||'')+'\n'
+    +(isV?'المستلم: ':'المستلَم من: ')+(name||'—')+'\n'
+    +'المبلغ: *'+money(d.amount)+'*\n'
+    +((isV?d.being:d.being)?'البيان: '+(d.being)+'\n':'')
+    +(prog?'البرنامج: '+prog+'\n':'')
+    +(isV?'\nنرجو الاحتفاظ بهذه الرسالة كإشعار بالصرف.':'\nشكراً لكم — هذه الرسالة إشعار باستلام المبلغ.');
+  try{ if(typeof log==='function') log('إرسال سند واتساب',d.num+' → '+(name||'')+(ph?' ('+ph+')':''),d.num); }catch(e){}
+  waOpen(ph,t);
+}
+function addWaButtons(){
+  [['vou-body','v'],['rec-tab-body','r']].forEach(function(x){
+    var tb=document.getElementById(x[0]); if(!tb) return;
+    [].forEach.call(tb.querySelectorAll('tr'),function(tr){
+      if(tr.querySelector('.wa-btn')) return; var id=tr.querySelector('.idt'); if(!id) return;
+      var num=id.textContent.trim(), last=tr.lastElementChild; if(!last||!num) return;
+      var b=document.createElement('button'); b.className='abn wa-btn'; b.type='button'; b.title='إرسال السند للمستلم عبر واتساب';
+      b.style.cssText='background:#dcfce7;color:#128c4b;font-weight:800'; b.textContent='📲 واتساب';
+      b.onclick=function(e){ e.stopPropagation(); waDoc(x[1],num); };
+      var host=last.querySelector('div')||last; host.appendChild(b);
+    });
+  });
+}
+['renderVouchers','renderRecTab'].forEach(function(fnm){
+  var o=global[fnm]; if(typeof o!=='function'||o.__wa) return;
+  var w=function(){ var r=o.apply(this,arguments); try{ addWaButtons(); }catch(e){} return r; }; w.__wa=true; global[fnm]=w;
+  try{ (0,eval)(fnm+'=window.'+fnm); }catch(e){}
+});
+
 function init(){ injectCss(); shorts(); compactTop(); admBackup(); place(); var b=document.getElementById('vadd-btn'); if(b&&/جديد/.test(b.textContent)) b.textContent='＋ سند صرف'; }
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init); else init();
-global.UI111={place:place,VER:VER};
+global.UI111={place:place,VER:VER,waDoc:waDoc,checkUpdate:checkUpdate};
 })(window);
 
 </script>
