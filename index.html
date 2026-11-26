@@ -21511,6 +21511,77 @@ global.Sec={hash:hashPw,verify:verify,policy:policy,setPass:setPass,check:check,
   fb:FB,fbEnable:FB.enable,panel:function(){ return FB.panel(); },sha256:sha256};
 })(window);
 
+/* ╔══════════════════════════════════════════════════════════════════╗
+   ║  الوحدة 27 (v111) — ترتيب الواجهة                                   ║
+   ║  • حذف اسم الشركة ووصف النظام أسفل الشعار في القائمة الجانبية        ║
+   ║  • النسخة الاحتياطية والاستيراد داخل «⚙️ الإدارة»                    ║
+   ║  • زر «سند صرف» واحد فقط في صفحة السندات                             ║
+   ║  • مؤشر الاتصال «● متصل» أعلى الصفحة بجوار الإدارة مع رقم الإصدار     ║
+   ╚══════════════════════════════════════════════════════════════════╝ */
+(function(global){
+'use strict';
+var VER='v111';
+global.DROOB_VER=VER;
+var css=''
+ +'.sb-hd .sb-org,.sb-hd .sb-sub{display:none!important}'
+ +'#btn-backup,#btn-import{display:none!important}'
+ +'#vsec-vou{display:none!important}'
+ +'#syncBadge.in-top{position:static!important;box-shadow:none!important;z-index:auto!important;padding:6px 12px!important;border-radius:20px!important;font-size:12px!important;align-items:center;white-space:nowrap;max-width:260px;overflow:hidden;text-overflow:ellipsis;border:1.5px solid currentColor;opacity:1!important;cursor:pointer}'
+ +'#syncBadge .dot{width:9px;height:9px;border-radius:50%;background:#16a34a;box-shadow:0 0 0 3px rgba(22,163,74,.22);display:inline-block;flex:none}'
+ +'#app-ver{font-size:11px;font-weight:800;color:#1f3a7a;background:#eef2fb;border:1px solid #d6def0;border-radius:8px;padding:4px 8px;direction:ltr;white-space:nowrap}'
+ +'#adm-bk{display:flex;gap:8px;flex-wrap:wrap;align-items:center;background:#f8fafc;border:1px dashed #cbd5e1;border-radius:10px;padding:9px 12px;margin-bottom:14px}'
+ +'#adm-bk .adm-bk-t{font-weight:800;color:#1f3a7a;font-size:13px;margin-left:auto}'
+ +'@media(max-width:820px){#app-ver{display:none}#syncBadge.in-top{max-width:120px}}';
+function injectCss(){ if(document.getElementById('ui111-css')) return; var s=document.createElement('style'); s.id='ui111-css'; s.textContent=css; document.head.appendChild(s); }
+
+/* المؤشر في الشريط العلوي */
+function place(){
+  var el=document.getElementById('syncBadge'), bar=document.querySelector('.topbar .tr2'); if(!el||!bar) return;
+  if(!el.classList.contains('in-top')){ el.classList.add('in-top'); }
+  var adm=document.getElementById('btn-adm');
+  var ver=document.getElementById('app-ver');
+  if(!ver){ ver=document.createElement('span'); ver.id='app-ver'; ver.textContent=VER; ver.title='رقم إصدار النظام'; }
+  if(el.parentNode!==bar){ bar.insertBefore(el, adm||bar.firstChild); }
+  if(ver.parentNode!==bar||ver.nextSibling!==el){ bar.insertBefore(ver, el); }
+  if(!el.onclick) el.onclick=function(){ try{ if(typeof showConnDiag==='function') showConnDiag(); }catch(e){} };
+}
+function connected(el){
+  el.innerHTML='<span class="dot"></span>متصل';
+  el.style.background='#ecfdf3'; el.style.color='#0a7c4e'; el.title='متصل بقاعدة البيانات — كل التعديلات محفوظة ومتزامنة';
+}
+var orig=global.setSync;
+if(typeof orig==='function'&&!orig.__ui111){
+  var w=function(state){
+    var r=orig.apply(this,arguments);
+    try{ var el=document.getElementById('syncBadge'); if(el){ place(); if(state==='synced'||state===undefined) connected(el); } }catch(e){}
+    return r;
+  };
+  w.__ui111=true; global.setSync=w;
+  try{ (0,eval)('setSync=window.setSync'); }catch(e){}
+}
+/* حالات تُكتب مباشرةً من أماكن أخرى (محفوظ محلياً/تعذّر الحفظ) تبقى كما هي في نفس المكان */
+setInterval(function(){ try{ place(); var el=document.getElementById('syncBadge'); if(el&&/محفوظ ومتزامن/.test(el.textContent)) connected(el); }catch(e){} },1500);
+
+/* النسخة الاحتياطية والاستيراد داخل الإدارة */
+function admBackup(){
+  var ov=document.getElementById('ov-admin'); if(!ov||document.getElementById('adm-bk')) return;
+  var tabs=ov.querySelector('.modal > div[style*="flex"]'); if(!tabs) return;
+  var d=document.createElement('div'); d.id='adm-bk';
+  d.innerHTML='<span class="adm-bk-t">🗄️ البيانات</span>'
+    +'<button class="tb" onclick="exportBackup()" style="background:#d5f5e3;color:#0a7c4e;font-weight:700;border:1.5px solid #0a7c4e">💾 نسخة احتياطية</button>'
+    +'<button class="tb" onclick="importBackup()" style="background:#e8f0fb;color:#1f3a7a;font-weight:700;border:1.5px solid #1f3a7a">📂 استيراد</button>';
+  tabs.parentNode.insertBefore(d, tabs);
+}
+
+/* زر الإضافة في صفحة السندات: نص موحّد «＋ سند صرف» */
+var oSw=global.switchVTab;
+if(typeof oSw==='function'&&!oSw.__ui111){ var sw=function(){ var r=oSw.apply(this,arguments); try{ var b=document.getElementById('vadd-btn'); if(b) b.textContent=b.textContent.replace(/^\+\s*/,'＋ '); }catch(e){} return r; }; sw.__ui111=true; global.switchVTab=sw; }
+
+function init(){ injectCss(); admBackup(); place(); var b=document.getElementById('vadd-btn'); if(b&&/جديد/.test(b.textContent)) b.textContent='＋ سند صرف'; }
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init); else init();
+global.UI111={place:place,VER:VER};
+})(window);
+
 </script>
 </body>
 </html>
