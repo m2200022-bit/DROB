@@ -21286,6 +21286,14 @@ var FB=(function(){
     return fetch(membersUrl(),{method:'PATCH',headers:Object.assign({'Content-Type':'application/json'},authH()),body:JSON.stringify(body)}).then(function(r){ return r.ok; }).catch(function(){ return false; }); }
   /* بعد دخول ناجح (كلمة المرور تحققت محلياً): يضيف المستخدم بريده إلى القائمة إن لم يكن فيها */
   function selfJoin(cu){ if(!tok) return; readMembers().then(function(have){ if(!have||have.indexOf(email)>-1) return; writeMembers(have.concat([email]).sort(),cu.name||cu.u).then(function(ok){ if(ok) log2('🔐 إضافة الحساب إلى أعضاء قاعدة البيانات',cu.u); }); }); }
+  /* المدير يعتمد مستخدماً سجّل دخوله بعد القفل (أُنشئ حسابه لكنه ليس في القائمة بعد) */
+  function approve(u){
+    var cu=gv('CU'); if(!tok||!cu||cu.role!=='admin') return alert('هذا الإجراء للمدير بعد تسجيل الدخول');
+    if(!confirm('➕ إضافة «'+u+'» إلى أعضاء قاعدة البيانات؟\n\nتأكد أولاً أن «'+u+'» نفسه سجّل الدخول مرة واحدة على الرابط بعد التحديث (فيُنشأ حسابه بكلمة مروره هو).\nبعد الإضافة يسجّل دخوله من جديد فتظهر بياناته.')) return;
+    readMembers().then(function(have){ if(have==null) return alert('تعذّر قراءة القائمة'); var e=mail(u); if(have.indexOf(e)>-1) return alert('«'+u+'» موجود في القائمة'); return writeMembers(have.concat([e]).sort(),cu.name||cu.u).then(function(ok){
+      if(!ok) return alert('تعذّر التحديث'); var s2=gv('SETTINGS2'); s2.sec=s2.sec||{}; s2.sec.fbAccounts=s2.sec.fbAccounts||{}; s2.sec.fbAccounts[u]=e; s2._mts=Date.now(); save();
+      log2('🔐 اعتماد مستخدم في أعضاء قاعدة البيانات',u); try{ if(global.acctTab) acctTab('security'); }catch(x){} try{ toast('✅ أُضيف «'+u+'» — يسجّل دخوله الآن'); }catch(x){} }); });
+  }
   function syncMembers(force){
     var cu=gv('CU'); if(!tok||!cu||cu.role!=='admin') return Promise.resolve(false);
     var want=memberEmails(), disabled=users().filter(function(x){ return x&&x.disabled; }).map(function(x){ return mail(x.u); });
@@ -21322,7 +21330,7 @@ var FB=(function(){
       +'<ol style="font-size:12.5px;line-height:2;margin:6px 0;padding-inline-start:22px">'
       +'<li>Authentication ← Sign-in method ← فعّل <b>Email/Password</b>. '+(s.provider==='on'?'<b style="color:#0a7c4e">✅ مفعّل</b>':s.provider==='off'?'<b style="color:#b91c1c">⛔ غير مفعّل بعد</b>':'<span style="color:#64748b">(لم يُتحقّق بعد — سجّل خروجك ودخولك)</span>')+'</li>'
       +'<li>Firestore Database ← <b>Rules</b>: أضف المقطع أدناه داخل <code>match /databases/{database}/documents</code> مع بقية الأنظمة، وأضف "duroob", "duroobAccess" إلى استثناءات القاعدة العامة ← <b>Publish</b>. انشرها بعد أن تظهر ✅ أمام كل المستخدمين أدناه — كل من يدخل يُضاف إلى قائمة الأعضاء تلقائياً. '+(locked()?'<b style="color:#0a7c4e">✅ قاعدة البيانات مقفلة</b>':'')+'</li></ol>'
-      +'<div style="font-size:12px;margin:6px 0">حسابات أُنشئت ('+Object.keys(acc).length+' من '+U.length+'): '+(U.map(function(x){ var mm=(s.fbMismatch||{})[x.u]; return (acc[x.u]&&!mm?'✅ ':mm?'⚠️ ':'⏳ ')+esc(x.u); }).join(' • ')||'—')+' <span style="color:#64748b">(⏳ = لم يدخل بعد • ⚠️ = كلمة مرور Firebase مختلفة)</span>'+'</div>'
+      +'<div style="font-size:12px;margin:6px 0">حسابات أُنشئت ('+Object.keys(acc).length+' من '+U.length+'): '+(U.map(function(x){ var mm=(s.fbMismatch||{})[x.u]; return (acc[x.u]&&!mm?'✅ ':mm?'⚠️ ':'⏳ ')+esc(x.u)+(!acc[x.u]?' <button class="fb" style="padding:2px 8px;font-size:11px" onclick="Sec.fb.approve(\''+esc(x.u)+'\')">➕ إضافة للأعضاء</button>':''); }).join(' • ')||'—')+' <span style="color:#64748b">(⏳ = لم يدخل بعد • ⚠️ = كلمة مرور Firebase مختلفة)</span>'+'</div>'
       +'<textarea id="sec-rules" readonly style="width:100%;height:190px;direction:ltr;font-family:monospace;font-size:11.5px;border:1px solid #cbd5e1;border-radius:8px;padding:8px">'+esc(rules())+'</textarea>'
       +'<div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap"><button class="bc" onclick="var t=document.getElementById(\'sec-rules\');t.select();try{navigator.clipboard.writeText(t.value)}catch(e){document.execCommand(\'copy\')};toast&&toast(\'📋 نُسخت القواعد\')">📋 نسخ القواعد</button>'
       +'<button class="bc" onclick="Sec.fb.syncMembers(true).then(function(ok){toast&&toast(ok?\'✅ حُدّثت قائمة الأعضاء\':\'⚠️ تعذّر التحديث — سجّل الدخول كمدير\')})">🔄 تحديث قائمة الأعضاء</button><span style="font-size:11.5px;color:#64748b;align-self:center">الأعضاء الحاليون: '+esc(memberEmails().join('، '))+'</span></div>'
@@ -21334,7 +21342,7 @@ var FB=(function(){
     log2('🔐 تفعيل حماية قاعدة البيانات',''); try{ if(global.acctTab) acctTab('security'); }catch(e){}
   }
   function signInOnly(u,pw){ return signIn(u,pw); }
-  return {syncMembers:syncMembers,memberEmails:memberEmails,locked:locked,setLocked:setLocked,signInOnly:signInOnly,reconnect:reconnect,onLogin:onLogin,changePw:changePw,rules:rules,panel:panel,enable:enable,mail:mail,on:on,token:function(){ return tok; }};
+  return {approve:approve,syncMembers:syncMembers,memberEmails:memberEmails,locked:locked,setLocked:setLocked,signInOnly:signInOnly,reconnect:reconnect,onLogin:onLogin,changePw:changePw,rules:rules,panel:panel,enable:enable,mail:mail,on:on,token:function(){ return tok; }};
 })();
 
 /* اكتشاف قفل قاعدة البيانات (بعد نشر القواعد) — ليتم الدخول عبر Firebase أولاً على أي جهاز */
