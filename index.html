@@ -2513,7 +2513,7 @@ let CU=null,nextId=1;
       // Force default passwords
       DEFAULT_USERS.forEach(function(d){
         var ex=USERS.find(function(u){return u.u===d.u;});
-        if(ex){ex.p=d.p;ex.role=d.role;}
+        if(ex){if(!ex.pwh)ex.p=d.p;ex.role=d.role;}
         else{USERS.push(d);}
       });
     }
@@ -5805,17 +5805,9 @@ function finalizeSettleSmart(){
 function doLogin(){
   const u=document.getElementById('lu').value.trim();
   const p=document.getElementById('lp').value;
-  // Always check DEFAULT_USERS first — bypasses any Firebase password
-  var _dfd=DEFAULT_USERS.find(function(x){return x.u===u&&x.p===p;});
-  // Also check USERS (for custom accounts added by admin)
-  var _fbu=(USERS||[]).find(function(x){return x.u===u&&x.p===p;});
-  var f=_dfd||_fbu;
-  // Extra: if username matches a default user but password wrong,
-  // still allow with default password (handles Firebase override)
-  if(!f){
-    var _defUser=DEFAULT_USERS.find(function(x){return x.u===u;});
-    if(_defUser&&_defUser.p===p) f=_defUser;
-  }
+  /* 🔐 v109: التحقق بكلمة مرور مُجزّأة — لا دخول افتراضي، قفل بعد 5 محاولات */
+  var f=window.Sec?Sec.check(u,p):null;
+  if(f===false) return;
   if(!f){var _le=document.getElementById('lerr');if(_le){_le.style.display='block';_le.textContent='اسم المستخدم أو كلمة المرور غير صحيحة';}return;}
   if(f.disabled){var _le2=document.getElementById('lerr');if(_le2){_le2.style.display='block';_le2.textContent='⛔ هذا الحساب معطّل. تواصل مع المدير.';}return;}
   CU=f;document.getElementById('lerr').style.display='none';
@@ -5825,7 +5817,7 @@ function doLogin(){
   document.getElementById('sb-av').textContent=CU.name.charAt(0);
   if(isAdm()){document.getElementById('btn-adm').style.display='flex';document.getElementById('btn-backup').style.display='flex';document.getElementById('btn-import').style.display='flex';}
   document.getElementById('pg-d').textContent='اليوم: '+new Date().toLocaleDateString('ar-SA',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
-  buildNav();fillAllSelects();goPage('dashboard');log('تسجيل دخول','');setTimeout(function(){var lb=localStorage.getItem('droob_last_backup');if(!lb)localStorage.setItem('droob_last_backup',new Date().toISOString());},100);
+  buildNav();fillAllSelects();goPage('dashboard');log('تسجيل دخول','');if(window.Sec)Sec.afterLogin();setTimeout(function(){var lb=localStorage.getItem('droob_last_backup');if(!lb)localStorage.setItem('droob_last_backup',new Date().toISOString());},100);
 }
 function doLogout(){CU=null;document.getElementById('app').classList.remove('show');document.getElementById('ls').style.display='flex';document.getElementById('lu').value='';document.getElementById('lp').value='';}
 
@@ -7584,12 +7576,12 @@ function openAccessEdit(u){
 function changeUserPass(uname){
   var usr=(USERS||[]).find(function(x){return x.u===uname;});
   if(!usr)return;
-  var np=prompt('🔑 كلمة المرور الجديدة للمستخدم: '+usr.name+'\n(6 أحرف على الأقل)');
+  var np=prompt('🔑 كلمة المرور الجديدة للمستخدم: '+usr.name+'\n(8 أحرف على الأقل — حروف وأرقام)\nسيُطلب من المستخدم تغييرها عند دخوله.');
   if(!np)return;
-  if(np.length<6){alert('⚠️ كلمة المرور يجب أن تكون 6 أحرف على الأقل');return;}
+  var _pe=window.Sec?Sec.policy(np,usr.u):(np.length<8?'⚠️ 8 أحرف على الأقل':'');if(_pe){alert(_pe);return;}
   var cp=prompt('✅ أعد إدخال كلمة المرور للتأكيد:');
   if(np!==cp){alert('❌ كلمتا المرور غير متطابقتين');return;}
-  usr.p=np;
+  if(window.Sec){Sec.setPass(usr,np);usr.mustChange=true;}else usr.p=np;
   if(typeof cloudSave==='function')cloudSave(true);
   alert('✅ تم تغيير كلمة المرور للمستخدم: '+usr.name);
   renderAdmUsers();
@@ -9582,7 +9574,7 @@ function applyState(s){
     // ALWAYS force default passwords — no Firebase data can override them
     DEFAULT_USERS.forEach(function(d){
       var ex=USERS.find(function(u){return u.u===d.u;});
-      if(ex){ex.p=d.p;ex.role=d.role;} // force default password AND role
+      if(ex){if(!ex.pwh)ex.p=d.p;ex.role=d.role;} // v109: لا تُفرض كلمة مرور افتراضية على حساب له كلمة مرور مُجزّأة
       else{USERS.push({u:d.u,p:d.p,name:d.name,role:d.role,progs:d.progs});}
     });
   }else{USERS=DEFAULT_USERS.slice();}}
@@ -10701,7 +10693,8 @@ function reconcileAfterSnapshot(){
   }
   RestDoc.prototype.get=function(){
     var self=this;
-    return fetch(self.url,{method:'GET'}).then(function(res){
+    return fetch(self.url,{method:'GET',headers:(window.__fbAuthH?window.__fbAuthH():{})}).then(function(res){
+      if(res.status===403&&!window.__fbToken){try{localStorage.setItem('droob_fb_locked','1');}catch(_e){}}
       if(res.status===404)return {exists:false,data:function(){return null;}};
       if(!res.ok)return res.text().then(function(t){throw new Error('HTTP '+res.status+': '+t.slice(0,140));});
       return res.json().then(function(j){
@@ -10714,7 +10707,7 @@ function reconcileAfterSnapshot(){
     var self=this;
     return fetch(self.url,{
       method:'PATCH',
-      headers:{'Content-Type':'application/json'},
+      headers:Object.assign({'Content-Type':'application/json'},window.__fbAuthH?window.__fbAuthH():{}),
       body:JSON.stringify(encDoc(obj))
     }).then(function(res){
       if(!res.ok)return res.text().then(function(t){
@@ -11084,7 +11077,7 @@ function _initListeners(){
         // Force default passwords after Firebase load
         DEFAULT_USERS.forEach(function(d2){
           var ex=(USERS||[]).find(function(u){return u.u===d2.u;});
-          if(ex){ex.p=d2.p;ex.role=d2.role;}else{USERS.push(d2);}
+          if(ex){if(!ex.pwh)ex.p=d2.p;ex.role=d2.role;}else{USERS.push(d2);}
         });
       }catch(_e){console.error('applyState error:',_e);}
       finally{_applying=false;}
@@ -11345,7 +11338,10 @@ function _initListeners(){
 function initFirebase(){
   try{
     if(_fbReady)return;                       // مُهيّأة مسبقاً
-    if(!window.firebase||!window.firebase.firestore){
+    /* 🔐 v109: قاعدة البيانات المحمية — لا اتصال قبل الدخول، وبعده عبر REST برمز المستخدم */
+    var _secOn=false;try{_secOn=localStorage.getItem('droob_fb_locked')==='1';}catch(_e){}
+    if(_secOn&&!window.__fbToken){setSync('offline');return;}
+    if(window.__fbToken||!window.firebase||!window.firebase.firestore){
       /* 🌐 المكتبة محجوبة → اتصل بقاعدة البيانات مباشرة عبر HTTPS
          (يعمل ما دام نطاق firestore.googleapis.com غير محجوب) */
       var rdb=window._makeRestDb&&window._makeRestDb(firebaseConfig);
@@ -15291,7 +15287,7 @@ function renderAccounting(){
       +'<div id="acc-tabs" style="display:flex;gap:5px;flex-wrap:wrap;margin:0 0 10px"></div><div id="acc-body"></div>';
   }
   var tabs=[['check','🧪 فحص المطابقة'],['journal','📒 القيود المزدوجة'],['trial','⚖️ ميزان المراجعة'],['income','📊 قائمة الدخل'],['budget','🎯 الميزانية والفعلي'],
-    ['recon','⚖️ المطابقة البنكية'],['cheques','📄 دفتر الشيكات'],['coa','🗂️ دليل الحسابات'],['periods','🔒 الإقفال والترقيم'],['backup','☁️ النسخ والاستعادة']];
+    ['recon','⚖️ المطابقة البنكية'],['cheques','📄 دفتر الشيكات'],['security','🔐 الأمان'],['coa','🗂️ دليل الحسابات'],['periods','🔒 الإقفال والترقيم'],['backup','☁️ النسخ والاستعادة']];
   $('acc-tabs').innerHTML=tabs.map(function(t){ return '<button class="fb'+(_acctTab===t[0]?' on':'')+'" onclick="acctTab(\''+t[0]+'\')">'+t[1]+'</button>'; }).join('');
   var b=$('acc-body'); b.dataset.tab=_acctTab;
   try{
@@ -15305,6 +15301,7 @@ function renderAccounting(){
     else if(_acctTab==='recon') b.innerHTML=htmlRecon();
     else if(_acctTab==='coa') b.innerHTML=htmlCoa();
     else if(_acctTab==='cheques') b.innerHTML='';
+    else if(_acctTab==='security') b.innerHTML=window.Sec?Sec.panel():'';
   }catch(e){ b.innerHTML='<div style="'+BOX+';color:#c0392b">تعذّر عرض التبويب: '+esc(e.message)+'</div>'; console.error(e); }
   if(window.Merge)Merge.acct(_acctTab,b);
 }
@@ -18945,32 +18942,98 @@ function custSection(p){
         +'<td class="a" style="'+(o&&lf?'color:#b91c1c;font-weight:900':'')+'">'+F(lf)+'</td><td>'+(o?'🔓 مفتوحة':c.closedAdmin?'🔒 مغلقة إدارياً':c.status==='settled'?'✅ مصفّاة':'🔒 مغلقة')+'</td></tr>'; }).join('')+'</table>';
 }
 /* ═════════════ إضافة مستفيد / مورد ═════════════ */
-function addParty(){
+function addParty(prefill){
   var old=$('pty-ov'); if(old) old.remove();
   var d=document.createElement('div'); d.id='pty-ov'; d.style.cssText='position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:9990;display:flex;align-items:center;justify-content:center;padding:16px';
   var f=function(lbl,inner){ return '<div class="fg"><label class="fl">'+lbl+'</label>'+inner+'</div>'; };
   d.innerHTML='<div class="modal" style="max-width:560px;width:100%;max-height:90vh;overflow:auto;direction:rtl"><div class="mh"><span class="mt">➕ إضافة مستفيد / مورد</span><button class="mx" onclick="document.getElementById(\'pty-ov\').remove()">✕</button></div>'
-    +'<div class="fr">'+f('الاسم *','<input class="fi" id="pty-name" list="dl-parties">')+f('النوع','<select class="fs" id="pty-type"><option value="person">👤 شخص / موظف</option><option value="supplier">🏢 مورد / شركة</option><option value="client">🧳 مشترك / مودِع</option></select>')+'</div>'
+    +'<div class="fr">'+f('الاسم *','<input class="fi" id="pty-name" autocomplete="off">')+f('النوع *','<select class="fs" id="pty-type"><option value="">— اختر النوع —</option><option value="person">👤 شخص / موظف</option><option value="supplier">🏢 مورد / شركة</option><option value="client">🧳 مشترك / مودِع</option></select>')+'</div>'
     +'<div class="fr">'+f('نوع الهوية','<select class="fs" id="pty-idtype"><option value="qid">🪪 رقم شخصي (البطاقة)</option><option value="passport">🛂 جواز سفر</option><option value="cr">🏢 سجل تجاري</option></select>')+f('رقم الهوية','<input class="fi" id="pty-idno" style="direction:ltr;text-align:right">')+'</div>'
-    +'<div class="fr">'+f('الجوال','<input class="fi" id="pty-phone" type="tel" style="direction:ltr;text-align:right">')+f('رقم الحساب / IBAN','<input class="fi" id="pty-iban" style="direction:ltr;text-align:right">')+'</div>'
+    +'<div class="fr">'+f('الجوال *','<input class="fi" id="pty-phone" type="tel" style="direction:ltr;text-align:right">')+f('رقم الحساب / IBAN','<input class="fi" id="pty-iban" style="direction:ltr;text-align:right">')+'</div>'
     +f('الجهة / ملاحظات','<input class="fi" id="pty-note">')
     +'<div id="pty-err" style="color:#b91c1c;font-size:12px;min-height:16px"></div>'
     +'<div style="display:flex;gap:8px;margin-top:6px"><button class="bs" onclick="Control.saveParty()">💾 حفظ</button><button class="bc" onclick="document.getElementById(\'pty-ov\').remove()">إلغاء</button></div></div>';
   d.addEventListener('click',function(e){ if(e.target===d) d.remove(); });
-  document.body.appendChild(d); fillDatalist(); setTimeout(function(){ var n=$('pty-name'); if(n) n.focus(); },50);
+  document.body.appendChild(d); fillDatalist(); setTimeout(function(){ var n=$('pty-name'); if(n){ if(typeof prefill==='string') n.value=prefill; (typeof prefill==='string'?$('pty-phone'):n).focus(); } },50);
 }
+function phoneKey(p){ var d=digits(p).replace(/\D/g,''); if(d.indexOf('00974')===0) d=d.slice(5); else if(d.indexOf('974')===0&&d.length>8) d=d.slice(3); return d.slice(-8); }
+function phoneOwner(p){ var k=phoneKey(p); if(k.length<7) return null; return vendors().find(function(v){ return v&&!v.mergedInto&&v.phone&&phoneKey(v.phone)===k; })||null; }
 function saveParty(){
-  var g=function(id){ return String(($(id)||{}).value||'').trim(); }, name=g('pty-name');
-  if(!name){ $('pty-err').textContent='⚠️ الاسم مطلوب'; return; }
-  var ex=vendorOf(name);
-  if(ex&&!confirm('«'+ex.name+'» مسجّل مسبقاً. تحديث بياناته بالقيم المُدخلة؟')) return;
-  var v=ex||ensureVendor(name);
-  v.ptype=g('pty-type')||v.ptype; if(g('pty-idno')){ v.idType=g('pty-idtype'); v.idNum=digits(g('pty-idno')); } if(g('pty-phone')) v.phone=digits(g('pty-phone'));
-  if(g('pty-iban')) v.iban=g('pty-iban').toUpperCase(); if(g('pty-note')) v.note=g('pty-note'); v.active=true;
+  var g=function(id){ return String(($(id)||{}).value||'').trim(); }, name=g('pty-name'), typ=g('pty-type'), ph=digits(g('pty-phone')).replace(/[^\d+]/g,'');
+  var err=function(m){ var e=$('pty-err'); if(e) e.textContent=m; return false; };
+  if(!name) return err('⚠️ الاسم مطلوب');
+  if(!typ) return err('⚠️ اختر النوع (شخص / مورد / جهة)');
+  if(!ph) return err('⚠️ رقم الجوال مطلوب');
+  if(phoneKey(ph).length<8) return err('⚠️ رقم الجوال غير صحيح (8 أرقام على الأقل)');
+  var ex=vendorOf(name); if(ex&&!ex.mergedInto) return err('⛔ الاسم «'+ex.name+'» مسجّل مسبقاً — لا يمكن إضافته مرة أخرى');
+  var po=phoneOwner(ph); if(po) return err('⛔ رقم الجوال '+ph+' مسجّل مسبقاً باسم «'+po.name+'» — لا يمكن إضافته مرة أخرى');
+  var v=ensureVendor(name);
+  v.ptype=typ; v.phone=ph; if(g('pty-idno')){ v.idType=g('pty-idtype'); v.idNum=digits(g('pty-idno')); }
+  if(g('pty-iban')) v.iban=g('pty-iban').toUpperCase(); if(g('pty-note')) v.note=g('pty-note'); v.active=true; v.registeredAt=new Date().toISOString(); v.registeredBy=(typeof CU!=='undefined'&&CU)?CU.name:'';
   touch('VENDORS',v.id,v); _resCache=null;
-  try{ if(typeof log==='function') log(ex?'تحديث مستفيد':'إضافة مستفيد',v.name,''); }catch(e){}
-  save(); var o=$('pty-ov'); if(o) o.remove(); renderParties(); fillDatalist();
+  try{ if(typeof log==='function') log('تسجيل مستفيد / مورد',v.name+' — '+ph,''); }catch(e){}
+  save(); var o=$('pty-ov'); if(o) o.remove(); try{ renderParties(); }catch(e){} fillDatalist();
+  /* إن كان التسجيل من داخل سند مفتوح: أعد تعبئة الاسم والجوال */
+  try{ if(REQ_PEND&&REQ_PEND.field==='ao-rec'){ var se=aoSelect(); if(se) aoOptions(se,v.name); } }catch(e){}
+  try{ if(REQ_PEND){ var nf=$(REQ_PEND.field); if(nf){ nf.value=v.name; nf.dispatchEvent(new Event('change')); } if(REQ_PEND.phone){ var pf=$(REQ_PEND.phone); if(pf&&!pf.value) pf.value=ph; } REQ_PEND=null; if(typeof toast==='function') toast('✅ سُجّل «'+v.name+'» — أكمل الحفظ الآن'); } }catch(e){}
+  return true;
 }
+/* ═════════════ لا سند ولا خروج أصل لاسم غير مسجّل ═════════════ */
+var REQ_PEND=null;
+function registered(name){ var v=vendorOf(name); return !!(v&&!v.mergedInto); }
+var REQ=[
+  {save:'saveVoucher',field:'vou-rec',edit:'editVoucherId',col:'VOUCHERS',nf:'recipient',lbl:'المستفيد',phone:'vou-pphone'},
+  {save:'saveReceipt',field:'rec-frm',edit:'editReceiptId',col:'RECEIPTS',nf:'from',lbl:'الدافع',phone:'rec-pphone'},
+  {save:'saveReward',field:'rw-name',edit:'editRewardId',col:'REWARDS',nf:'name',lbl:'المستفيد',phone:'rw-pphone'},
+  {save:'saveCustody',field:'cu-name',edit:'editCustodyId',col:'CUSTODIES',nf:'recipient',lbl:'مستلم العهدة',phone:'cu-phone'},
+  {save:'saveAssetOut',field:'ao-rec',edit:null,col:null,lbl:'مستلم الأصل',phone:'ao-phone'}
+];
+function requireParty(f){
+  var name=String(($(f.field)||{}).value||'').trim(); if(!name) return true;   /* الحقول الفارغة تتحقق منها دالة الحفظ نفسها */
+  if(f.edit){ var id=gv(f.edit); if(id){ var r=arr(f.col).find(function(x){ return x&&x.id==id; }); if(r&&norm(r[f.nf])===norm(name)) return true; } }   /* تعديل سند قديم دون تغيير الاسم */
+  try{ var c2=(gv('SETTINGS2')||{}).ctl||{}; if(c2.reqParty===false||global.__REQ_OFF) return true; }catch(e){}
+  if(registered(name)) return true;
+  REQ_PEND={field:f.field,phone:f.phone};
+  if(confirm('⛔ «'+name+'» غير مسجّل في سجل المستفيدين والموردين.\n\nقم بتسجيل '+f.lbl+' (مستفيد أو مورد) أولاً — الاسم والنوع والجوال إلزامية.\n\nفتح نموذج التسجيل الآن؟')) addParty(name);
+  else REQ_PEND=null;
+  return false;
+}
+function hookReq(){
+  REQ.forEach(function(f){ var fn=global[f.save]; if(typeof fn!=='function'||fn.__req) return;
+    var w=function(){ if(!requireParty(f)) return; return fn.apply(this,arguments); };
+    for(var k in fn) try{ w[k]=fn[k]; }catch(e){}
+    w.__req=true; global[f.save]=w; });
+}
+hookReq(); setTimeout(hookReq,3500); setInterval(hookReq,5000);
+/* ═════════════ خروج أصل: المستلم يُختار من المسجّلين فقط (لا كتابة يدوية) ═════════════ */
+function aoOptions(sel,keep){
+  var L=vendors().filter(function(v){ return v&&!v.mergedInto&&v.active!==false&&String(v.name||'').trim(); })
+    .sort(function(a,b){ return String(a.name).localeCompare(String(b.name),'ar'); });
+  sel.innerHTML='<option value="">— اختر المستلم —</option>'
+    +L.map(function(v){ var t=v.ptype==='supplier'?'🏢 ':v.ptype==='entity'?'🏛️ ':'👤 '; return '<option value="'+esc(v.name)+'">'+t+esc(v.name)+(v.phone?' — '+esc(v.phone):'')+'</option>'; }).join('')
+    +'<option value="__new">➕ تسجيل مستفيد / مورد جديد…</option>';
+  if(keep&&L.some(function(v){ return v.name===keep; })) sel.value=keep;
+}
+function aoSelect(){
+  var el=$('ao-rec'); if(!el) return null;
+  if(el.tagName!=='SELECT'){
+    var s=document.createElement('select'); s.className='fs'; s.id='ao-rec';
+    el.parentNode.replaceChild(s,el); el=s;
+    s.addEventListener('change',function(){
+      if(s.value==='__new'){ s.value=''; REQ_PEND={field:'ao-rec',phone:'ao-phone'}; addParty(); return; }
+      var v=vendorOf(s.value), ph=$('ao-phone'); if(ph) ph.value=v&&v.phone?String(v.phone).replace(/^\+?974/,'').replace(/\D/g,'').slice(-8):'';
+    });
+  }
+  aoOptions(el,el.value);
+  return el;
+}
+function hookAoOpen(){
+  var o=global.openOv; if(typeof o!=='function'||o.__aosel) return;
+  var w=function(id){ var r=o.apply(this,arguments); if(id==='ov-asset-out') setTimeout(function(){ try{ aoSelect(); }catch(e){ console.warn(e); } },60); return r; };
+  for(var k in o) try{ w[k]=o[k]; }catch(e){} w.__aosel=true; global.openOv=w;
+}
+hookAoOpen(); setTimeout(hookAoOpen,3000); setTimeout(function(){ try{ aoSelect(); }catch(e){} },3000);
+
 /* ═════════════ إدارة سجل المستفيدين: تغيير الاسم المعتمد، الحذف من السجل، دمج مجموعة ═════════════ */
 function renameParty(enc){
   var old=decodeURIComponent(enc), nn=prompt('الاسم المعتمد الجديد لـ «'+old+'»:\n(الاسم الحالي يبقى اسماً بديلاً؛ السندات المطبوعة لا تتغير)',old); if(nn==null) return; nn=String(nn).trim(); if(!nn||nn===old) return;
@@ -19283,7 +19346,7 @@ function hookOpenOv(){
 }
 function init(){ addNav(); hookGoPage(); hookOpenOv(); hooks(); }
 init(); setTimeout(init,0); setTimeout(init,1800);
-global.Control={addParty:addParty,saveParty:saveParty,openCust:openCust,custSection:custSection,renameParty:renameParty,deleteVendor:deleteVendor,mergeGroup:mergeGroup,applyDecision1119:applyDecision1119,norm:norm,resolve:resolve,similar:similar,parties:parties,suggestions:suggestions,merge:merge,unalias:unalias,editParty:editParty,statement:statement,pf:pf,renderParties:renderParties,fillDatalist:fillDatalist,
+global.Control={registered:registered,requireParty:requireParty,phoneOwner:phoneOwner,addParty:addParty,saveParty:saveParty,openCust:openCust,custSection:custSection,renameParty:renameParty,deleteVendor:deleteVendor,mergeGroup:mergeGroup,applyDecision1119:applyDecision1119,norm:norm,resolve:resolve,similar:similar,parties:parties,suggestions:suggestions,merge:merge,unalias:unalias,editParty:editParty,statement:statement,pf:pf,renderParties:renderParties,fillDatalist:fillDatalist,
   dupCheck:dupCheck,cheques:cheques,chqIssues:chqIssues,renderCheques:renderCheques,cf:cf,setSt:setSt,addCheque:addCheque,makeVoucher:makeVoucher,printCheques:printCheques,
   aging:aging,renderAging:renderAging,af:af,remind:remind,remindText:remindText,printAging:printAging};
 })(window);
@@ -20997,6 +21060,290 @@ function init(){
 }
 init(); setTimeout(init,0); setTimeout(init,2500);
 global.AssetDoc={ensure:ensure,nextCode:nextCode,nextRet:nextRet,outDoc:outDoc,retDoc:retDoc,printOut:printOut,printRet:printRet,html:assetHtml};
+})(window);
+
+/* ╔══════════════════════════════════════════════════════════════════╗
+   ║  الوحدة 25 (v109) — الأمان                                          ║
+   ║  ١) كلمات المرور مُجزّأة (SHA-256 مملّح مكرّر 5000 مرة) — لا نص صريح ║
+   ║     في الملف ولا في السحابة ولا في النسخ الاحتياطية                  ║
+   ║  ٢) إلغاء الدخول الافتراضي admin/admin123 — يُقبل مرة واحدة فقط ثم   ║
+   ║     يُفرض تغييرها فوراً، والحساب الافتراضي user1 معطّل                ║
+   ║  ٣) سياسة كلمة المرور: 8 أحرف على الأقل، حروف وأرقام                 ║
+   ║  ٤) قفل الحساب 15 دقيقة بعد 5 محاولات خاطئة + تسجيل كل محاولة        ║
+   ║  ٥) «🔑 تغيير كلمة المرور» لكل مستخدم                                 ║
+   ║  ٦) حماية قاعدة البيانات (Firebase Authentication + قواعد الأمان)   ║
+   ╚══════════════════════════════════════════════════════════════════╝ */
+(function(global){
+'use strict';
+function $(id){ return document.getElementById(id); }
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+function gv(n){ try{ return (0,eval)(n); }catch(e){ return undefined; } }
+function users(){ var u=gv('USERS'); return Array.isArray(u)?u:[]; }
+function log2(a,b){ try{ if(typeof log==='function') log(a,b||'',''); }catch(e){} }
+function save(){ try{ if(typeof cloudSave==='function') cloudSave(true); }catch(e){} try{ if(typeof localSave==='function') localSave('security'); }catch(e){} }
+
+/* ═════════ SHA-256 (متزامن — ليعمل داخل دالة الدخول) ═════════ */
+var K=[0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+function utf8(s){ return unescape(encodeURIComponent(s)); }
+function sha256(str){
+  var s=utf8(str), l=s.length, words=[], i;
+  for(i=0;i<l;i++) words[i>>2]|=(s.charCodeAt(i)&0xff)<<(24-(i%4)*8);
+  words[l>>2]|=0x80<<(24-(l%4)*8); words[(((l+8)>>6)+1)*16-1]=l*8;
+  var H=[0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19], W=new Array(64);
+  for(var j=0;j<words.length;j+=16){
+    var a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
+    for(i=0;i<64;i++){
+      if(i<16) W[i]=words[j+i]|0;
+      else{ var x=W[i-15], y=W[i-2]; W[i]=(((x>>>7|x<<25)^(x>>>18|x<<14)^(x>>>3))+W[i-7]+((y>>>17|y<<15)^(y>>>19|y<<13)^(y>>>10))+W[i-16])|0; }
+      var t1=(h+((e>>>6|e<<26)^(e>>>11|e<<21)^(e>>>25|e<<7))+((e&f)^(~e&g))+K[i]+W[i])|0;
+      var t2=(((a>>>2|a<<30)^(a>>>13|a<<19)^(a>>>22|a<<10))+((a&b)^(a&c)^(b&c)))|0;
+      h=g; g=f; f=e; e=(d+t1)|0; d=c; c=b; b=a; a=(t1+t2)|0;
+    }
+    H[0]=(H[0]+a)|0;H[1]=(H[1]+b)|0;H[2]=(H[2]+c)|0;H[3]=(H[3]+d)|0;H[4]=(H[4]+e)|0;H[5]=(H[5]+f)|0;H[6]=(H[6]+g)|0;H[7]=(H[7]+h)|0;
+  }
+  return H.map(function(v){ return ('00000000'+(v>>>0).toString(16)).slice(-8); }).join('');
+}
+var ITER=5000;
+function salt(){ var a=new Uint8Array(12); try{ crypto.getRandomValues(a); }catch(e){ for(var i=0;i<12;i++) a[i]=Math.floor(Math.random()*256); } return Array.prototype.map.call(a,function(x){ return ('0'+x.toString(16)).slice(-2); }).join(''); }
+function derive(pw,sl,it){ var h=sha256(sl+'|'+pw); for(var i=1;i<it;i++) h=sha256(h+sl+pw); return h; }
+function hashPw(pw){ var sl=salt(); return 'h1$'+ITER+'$'+sl+'$'+derive(pw,sl,ITER); }
+function verify(pw,ph){ var p=String(ph||'').split('$'); if(p[0]!=='h1'||p.length!==4) return false; var d=derive(pw,p[2],+p[1]||ITER), x=p[3], r=0; if(d.length!==x.length) return false; for(var i=0;i<d.length;i++) r|=d.charCodeAt(i)^x.charCodeAt(i); return r===0; }
+
+/* ═════════ سياسة كلمة المرور ═════════ */
+var WEAK=['admin123','user1234','12345678','123456789','password','qwerty123','11111111','00000000','droob123','duroob123'];
+function policy(pw,u){
+  pw=String(pw||'');
+  if(pw.length<8) return '⚠️ كلمة المرور 8 أحرف على الأقل';
+  if(!/[A-Za-z؀-ۿ]/.test(pw)||!/[0-9٠-٩]/.test(pw)) return '⚠️ كلمة المرور يجب أن تحتوي على حروف وأرقام معاً';
+  if(u&&pw.toLowerCase().indexOf(String(u).toLowerCase())>-1) return '⚠️ لا تستخدم اسم المستخدم داخل كلمة المرور';
+  if(WEAK.indexOf(pw.toLowerCase())>-1) return '⚠️ كلمة المرور شائعة وسهلة التخمين';
+  return '';
+}
+function setPass(usr,pw){ usr.pwh=hashPw(pw); delete usr.p; delete usr.ph; usr.pwAt=new Date().toISOString(); usr.mustChange=false; usr._mts=Date.now(); }
+
+/* ═════════ قفل بعد المحاولات الخاطئة ═════════ */
+var MAXTRY=5, LOCKMIN=15;
+function lk(u){ try{ return JSON.parse(localStorage.getItem('droob_lk_'+String(u).toLowerCase())||'{}'); }catch(e){ return {}; } }
+function lkSet(u,o){ try{ localStorage.setItem('droob_lk_'+String(u).toLowerCase(),JSON.stringify(o)); }catch(e){} }
+function showErr(m){ var e=$('lerr'); if(e){ e.style.display='block'; e.textContent=m; } }
+
+/* ═════════ التحقق عند الدخول ═════════ */
+var DEF={admin:'admin123',user1:'user1234'};
+var MUST=null;
+function findUser(u){ var k=String(u||'').trim().toLowerCase(); return users().find(function(x){ return x&&String(x.u||'').toLowerCase()===k; })||null; }
+function check(u,p){
+  u=String(u||'').trim(); if(!u||!p){ showErr('أدخل اسم المستخدم وكلمة المرور'); return false; }
+  var L=lk(u), now=Date.now();
+  if(L.until&&now<L.until){ showErr('🔒 الحساب مقفل مؤقتاً بسبب محاولات خاطئة — حاول بعد '+Math.ceil((L.until-now)/60000)+' دقيقة'); return false; }
+  var usr=findUser(u), ok=false, legacy=false;
+  if(usr){
+    if(usr.pwh) ok=verify(p,usr.pwh);
+    else if(usr.p!=null&&String(usr.p)===String(p)){ ok=true; legacy=true; }
+    else if(/^[0-9a-f]{64}$/.test(String(usr.ph||''))&&sha256(p)===usr.ph){ ok=true; legacy=true; }
+    if(ok&&!usr.pwh&&DEF[String(usr.u).toLowerCase()]===p&&String(usr.u).toLowerCase()!=='admin'){
+      showErr('⛔ الحساب الافتراضي «'+usr.u+'» معطّل لأسباب أمنية — يعيّن المدير له كلمة مرور جديدة'); log2('🔐 محاولة دخول بحساب افتراضي معطّل',usr.u); return false; }
+  }
+  /* جهاز جديد في وضع الحماية: لا بيانات محلية بعد — Firebase هو المرجع */
+  if(!ok&&FB.locked()&&!PENDING){ var fresh=!(usr&&usr.pwh); if(fresh||(typeof localMeta==='function'&&!localMeta())){ remoteLogin(u,p); return false; } }
+  if(ok&&legacy&&FB.locked()&&DEF[String(usr.u).toLowerCase()]===p){ showErr('⛔ كلمة المرور الافتراضية غير مقبولة — قاعدة البيانات محمية'); return false; }
+  if(!ok){
+    L.n=(L.n||0)+1; if(L.n>=MAXTRY){ L.until=now+LOCKMIN*60000; L.n=0; }
+    lkSet(u,L); log2('🔐 محاولة دخول فاشلة',u+(L.until&&now<L.until?' — قُفل الحساب '+LOCKMIN+' دقيقة':''));
+    showErr(L.until&&now<L.until?'🔒 تجاوزت 5 محاولات خاطئة — قُفل الحساب '+LOCKMIN+' دقيقة':'اسم المستخدم أو كلمة المرور غير صحيحة (متبقٍ '+(MAXTRY-(L.n||0))+' محاولات)');
+    return false;
+  }
+  lkSet(u,{});
+  /* تحويل كلمة المرور القديمة إلى صيغة مُجزّأة فوراً */
+  var weak=!!policy(p,usr.u)||(DEF[String(usr.u).toLowerCase()]===p);
+  if(legacy){ setPass(usr,p); save(); }
+  if(weak||usr.mustChange) MUST={u:usr.u,old:p};
+  else MUST=null;
+  LAST_PW=p;
+  return usr;
+}
+var LAST_PW=null;
+var PENDING=false;
+function remoteLogin(u,p){
+  PENDING=true; showErr('⏳ جارٍ التحقق من الحساب في قاعدة البيانات المحمية…');
+  FB.signInOnly(u,p).then(function(){
+    FB.reconnect();
+    var t0=Date.now(), iv=setInterval(function(){
+      var usr=findUser(u);
+      if(usr&&usr.pwh){ clearInterval(iv); PENDING=false; var lu=$('lu'), lp=$('lp'); if(lu) lu.value=u; if(lp) lp.value=p; try{ doLogin(); }catch(e){} }
+      else if(Date.now()-t0>25000){ clearInterval(iv); PENDING=false; showErr('⚠️ تم التحقق من الحساب لكن تعذّر تحميل بيانات المستخدمين — أعد المحاولة'); }
+    },700);
+  }).catch(function(e){ PENDING=false; var L=lk(u); L.n=(L.n||0)+1; if(L.n>=MAXTRY){ L.until=Date.now()+LOCKMIN*60000; L.n=0; } lkSet(u,L);
+    log2('🔐 محاولة دخول فاشلة (قاعدة البيانات المحمية)',u); showErr('اسم المستخدم أو كلمة المرور غير صحيحة'); });
+}
+/* بعد نجاح الدخول: ترحيل كل كلمات المرور النصية (للمدير) + فرض التغيير + حماية Firebase */
+function afterLogin(){
+  try{
+    var cu=gv('CU'); if(!cu) return;
+    if(cu.role==='admin'){ var n=0; users().forEach(function(x){ if(x&&!x.pwh&&x.p!=null&&String(x.p)!==''){ if(DEF[String(x.u).toLowerCase()]===String(x.p)&&String(x.u).toLowerCase()!=='admin'){ x.disabled=true; x.disabledWhy='حساب افتراضي'; } x.pwh=hashPw(String(x.p)); delete x.p; delete x.ph; x._mts=Date.now(); n++; } }); if(n){ save(); log2('🔐 ترحيل كلمات المرور إلى صيغة مُجزّأة',n+' مستخدم'); } }
+    addMyPwBtn();
+    if(MUST) setTimeout(function(){ forceChange(); },300);
+    try{ FB.onLogin(cu,LAST_PW); }catch(e){ console.warn('FB.onLogin',e); }
+    LAST_PW=null;
+  }catch(e){ console.warn('Sec.afterLogin',e); }
+}
+
+/* ═════════ نافذة تغيير كلمة المرور ═════════ */
+function pwModal(opts){
+  var o=$('sec-pw-ov'); if(o) o.remove();
+  var d=document.createElement('div'); d.id='sec-pw-ov';
+  d.style.cssText='position:fixed;inset:0;background:rgba(15,23,42,.72);z-index:99999;display:flex;align-items:center;justify-content:center;padding:16px';
+  d.innerHTML='<div style="background:#fff;border-radius:16px;max-width:420px;width:100%;padding:20px 22px;box-shadow:0 20px 60px rgba(0,0,0,.35);direction:rtl;font-family:inherit">'
+    +'<div style="font-size:18px;font-weight:900;color:#1f3a7a;margin-bottom:6px">🔑 '+esc(opts.title)+'</div>'
+    +'<div style="font-size:12.5px;color:#475569;line-height:1.8;margin-bottom:12px">'+opts.msg+'</div>'
+    +(opts.askOld?'<div class="fg"><label class="fl">كلمة المرور الحالية</label><input class="fi" type="password" id="sec-old" autocomplete="current-password"></div>':'')
+    +'<div class="fg"><label class="fl">كلمة المرور الجديدة</label><input class="fi" type="password" id="sec-new" autocomplete="new-password"></div>'
+    +'<div class="fg"><label class="fl">تأكيد كلمة المرور</label><input class="fi" type="password" id="sec-new2" autocomplete="new-password"></div>'
+    +'<div style="font-size:11.5px;color:#64748b;margin:2px 0 8px">8 أحرف على الأقل، حروف وأرقام معاً، ولا تحتوي على اسم المستخدم.</div>'
+    +'<div id="sec-err" style="color:#b91c1c;font-size:12.5px;font-weight:700;min-height:18px"></div>'
+    +'<div style="display:flex;gap:8px;margin-top:8px"><button class="bs" style="flex:1" id="sec-ok">💾 حفظ كلمة المرور</button>'+(opts.cancel?'<button class="bc" id="sec-cancel">إلغاء</button>':'')+'</div></div>';
+  document.body.appendChild(d);
+  setTimeout(function(){ var f=$(opts.askOld?'sec-old':'sec-new'); if(f) f.focus(); },60);
+  if(opts.cancel) $('sec-cancel').onclick=function(){ d.remove(); };
+  $('sec-ok').onclick=function(){
+    var usr=findUser(opts.u), e=$('sec-err'), np=$('sec-new').value, np2=$('sec-new2').value;
+    if(!usr){ e.textContent='المستخدم غير موجود'; return; }
+    if(opts.askOld&&!verify($('sec-old').value,usr.pwh)){ e.textContent='❌ كلمة المرور الحالية غير صحيحة'; return; }
+    var pe=policy(np,usr.u); if(pe){ e.textContent=pe; return; }
+    if(np!==np2){ e.textContent='❌ كلمتا المرور غير متطابقتين'; return; }
+    if(usr.pwh&&verify(np,usr.pwh)){ e.textContent='⚠️ اختر كلمة مرور مختلفة عن الحالية'; return; }
+    var oldPw=opts.askOld?$('sec-old').value:(MUST&&MUST.old);
+    setPass(usr,np); save(); log2('🔑 تغيير كلمة المرور',usr.u);
+    try{ FB.changePw(usr,oldPw,np); }catch(x){}
+    MUST=null; d.remove(); try{ if(typeof toast==='function') toast('✅ تم تغيير كلمة المرور'); }catch(x){}
+  };
+}
+function forceChange(){ var cu=gv('CU'); if(!cu) return; pwModal({u:cu.u,title:'تغيير كلمة المرور إلزامي',msg:'كلمة المرور الحالية <b>افتراضية أو ضعيفة</b>. لحماية بيانات الشركة يجب تعيين كلمة مرور جديدة قوية قبل المتابعة.',cancel:false}); }
+function changeMine(){ var cu=gv('CU'); if(!cu) return; pwModal({u:cu.u,title:'تغيير كلمة المرور',msg:'أدخل كلمة المرور الحالية ثم الجديدة.',askOld:true,cancel:true}); }
+function addMyPwBtn(){
+  if($('sec-mypw')) return; var host=document.querySelector('.sb-ft,.sb-user,#sb-nm');
+  var lo=document.querySelector('[onclick*="doLogout"]'); if(!lo) return;
+  var b=document.createElement('button'); b.id='sec-mypw'; b.className=lo.className; b.style.cssText=(lo.getAttribute('style')||'')+';margin-top:6px'; b.textContent='🔑 تغيير كلمة المرور'; b.onclick=changeMine;
+  lo.parentNode.insertBefore(b,lo.nextSibling);
+}
+
+/* ═════════ حماية قاعدة البيانات: Firebase Authentication ═════════
+   كل مستخدم في النظام = حساب Firebase بالبريد <اسم المستخدم>@duroob.app وبنفس كلمة مروره.
+   يُنشأ الحساب تلقائياً عند أول دخول. بعد ذلك تُقفل قاعدة البيانات بقواعد أمان
+   لا تسمح إلا لهؤلاء — فلا يفيد ملف النظام أو مفتاح الـ API وحده أي أحد. */
+var FB=(function(){
+  var DOM='duroob.app', ID='https://identitytoolkit.googleapis.com/v1/accounts:', TOK='https://securetoken.googleapis.com/v1/token?key=';
+  var tok=null, refresh=null, exp=0, email=null, timer=null;
+  function cfg(){ return gv('firebaseConfig')||{}; }
+  /* تلقائي: الدخول إلى Firebase يتم مع كل تسجيل دخول دون أي تفعيل يدوي */
+  function on(){ try{ return localStorage.getItem('droob_fb_secure')!=='0'; }catch(e){ return true; } }
+  function locked(){ try{ return localStorage.getItem('droob_fb_locked')==='1'; }catch(e){ return false; } }
+  function setLocked(v){ try{ localStorage.setItem('droob_fb_locked',v?'1':'0'); }catch(e){} }
+  function setOn(v){ try{ localStorage.setItem('droob_fb_secure',v?'1':'0'); }catch(e){} }
+  function mail(u){ u=String(u||'').trim().toLowerCase(); if(/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(u)) return u; if(/^[a-z0-9._-]+$/.test(u)) return u+'@'+DOM; var h=''; for(var i=0;i<u.length;i++) h+=u.charCodeAt(i).toString(16); return 'u'+h.slice(0,40)+'@'+DOM; }
+  function post(url,body){ return fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){ return r.json().then(function(j){ if(!r.ok){ var m=(j&&j.error&&j.error.message)||('HTTP '+r.status); throw new Error(m); } return j; }); }); }
+  function keep(j){ tok=j.idToken||j.id_token; refresh=j.refreshToken||j.refresh_token||refresh; exp=Date.now()+((+(j.expiresIn||j.expires_in)||3600)-300)*1000;
+    clearTimeout(timer); timer=setTimeout(renew,Math.max(60000,exp-Date.now())); global.__fbToken=tok; }
+  function renew(){ if(!refresh) return Promise.resolve(false);
+    return fetch(TOK+cfg().apiKey,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'grant_type=refresh_token&refresh_token='+encodeURIComponent(refresh)})
+      .then(function(r){ return r.json(); }).then(function(j){ if(j.id_token){ keep(j); return true; } return false; }).catch(function(){ return false; }); }
+  function signIn(u,pw){ email=mail(u); var k=cfg().apiKey;
+    return post(ID+'signInWithPassword?key='+k,{email:email,password:pw,returnSecureToken:true}).then(function(j){ keep(j); return 'ok'; })
+      .catch(function(e){ var m=String(e.message||e);
+        if(/EMAIL_NOT_FOUND|INVALID_LOGIN_CREDENTIALS/.test(m)) return post(ID+'signUp?key='+k,{email:email,password:pw,returnSecureToken:true}).then(function(j){ keep(j); return 'created'; }).catch(function(e2){ throw e; });
+        throw e; }); }
+  function authH(){ return tok?{'Authorization':'Bearer '+tok}:{}; }
+  global.__fbAuthH=authH;
+  /* بعد الدخول: إن كانت الحماية مفعّلة سجّل الدخول إلى Firebase وأعد الاتصال بالرمز */
+  function onLogin(cu,pw){
+    if(!pw) return;
+    if(!on()) return;
+    if(tok&&email===mail(cu.u)&&Date.now()<exp){ try{ var s3=gv('SETTINGS2'); s3.sec=s3.sec||{}; s3.sec.provider='on'; s3.sec.fbAccounts=s3.sec.fbAccounts||{}; s3.sec.fbAccounts[cu.u]=email; }catch(e){} setTimeout(function(){ syncMembers(); },3000); return; }
+    signIn(cu.u,pw).then(function(r){
+      try{ var s2=gv('SETTINGS2'); s2.sec=s2.sec||{}; s2.sec.fbAccounts=s2.sec.fbAccounts||{}; var had=s2.sec.fbAccounts[cu.u]; s2.sec.fbAccounts[cu.u]=email; s2.sec.provider='on'; if(s2.sec.fbMismatch) delete s2.sec.fbMismatch[cu.u]; if(!had){ s2._mts=Date.now(); setTimeout(save,4000); } }catch(e){}
+      log2('🔐 دخول قاعدة البيانات المحمية',cu.u+(r==='created'?' — أُنشئ حساب Firebase تلقائياً':''));
+      reconnect(); setTimeout(function(){ syncMembers(); },3000);
+    }).catch(function(e){
+      var m=String(e.message||e), s2=gv('SETTINGS2')||{}; s2.sec=s2.sec||{};
+      if(/OPERATION_NOT_ALLOWED|CONFIGURATION_NOT_FOUND|ADMIN_ONLY_OPERATION|API_KEY|PROJECT_NOT_FOUND/.test(m)){ s2.sec.provider='off'; return; }   /* لم يُفعَّل Email/Password بعد — يستمر النظام كما كان */
+      if(/INVALID_PASSWORD|INVALID_LOGIN|EMAIL_EXISTS|USER_DISABLED/.test(m)){ s2.sec.fbMismatch=s2.sec.fbMismatch||{}; s2.sec.fbMismatch[cu.u]=new Date().toISOString();
+        if(locked()) alert('⚠️ تعذّر الدخول إلى قاعدة البيانات المحمية لحساب «'+cu.u+'».\nكلمة مرور حساب Firebase تختلف عن كلمة مرور النظام (غالباً بعد أن غيّرها المدير لك).\nالحل: يحذف المدير حسابك من Firebase ← Authentication ← Users، ثم سجّل الدخول مجدداً فيُنشأ تلقائياً.');
+        return; }
+      console.warn('FB auth',m);
+    });
+  }
+  function reconnect(){ try{ global._fbReady=false; }catch(e){} try{ (0,eval)('_fbReady=false'); }catch(e){} try{ global._usingRest=true; if(typeof initFirebase==='function') initFirebase(); }catch(e){ console.warn('reconnect',e); } }
+  function changePw(usr,oldPw,np){
+    if(!on()) return; var cu=gv('CU'); if(!cu||String(cu.u).toLowerCase()!==String(usr.u).toLowerCase()||!tok) return;
+    post(ID+'update?key='+cfg().apiKey,{idToken:tok,password:np,returnSecureToken:true}).then(function(j){ keep(j); log2('🔐 تحديث كلمة مرور حساب Firebase',usr.u); }).catch(function(e){ console.warn('FB pw',e); });
+  }
+  /* قائمة الأعضاء المسموح لهم — مستند duroobAccess/members (على نمط نظام طلبات الفعاليات)
+     يحدّثها النظام تلقائياً عند دخول المدير أو إضافة مستخدم — فلا حاجة لتعديل القواعد عند إضافة مستخدم */
+  function memberEmails(){ return users().filter(function(x){ return x&&!x.disabled; }).map(function(x){ return mail(x.u); }).sort(); }
+  function syncMembers(force){
+    var cu=gv('CU'); if(!tok||!cu||cu.role!=='admin') return Promise.resolve(false);
+    var url='https://firestore.googleapis.com/v1/projects/'+cfg().projectId+'/databases/(default)/documents/duroobAccess/members?key='+cfg().apiKey, want=memberEmails();
+    return fetch(url,{headers:authH()}).then(function(r){ return r.ok?r.json():{}; }).then(function(j){
+      var have=((((j.fields||{}).emails||{}).arrayValue||{}).values||[]).map(function(v){ return v.stringValue; }).sort();
+      if(!force&&have.join('|')===want.join('|')) return false;
+      var body={fields:{emails:{arrayValue:{values:want.map(function(e){ return {stringValue:e}; })}},updatedAt:{stringValue:new Date().toISOString()},by:{stringValue:String(cu.name||cu.u)}}};
+      return fetch(url,{method:'PATCH',headers:Object.assign({'Content-Type':'application/json'},authH()),body:JSON.stringify(body)}).then(function(r){ if(r.ok){ log2('🔐 تحديث قائمة أعضاء قاعدة البيانات',want.length+' مستخدم'); return true; } return false; });
+    }).catch(function(){ return false; });
+  }
+  /* قواعد خاصة بمجموعتي النظام فقط — المشروع مشترك مع أنظمة أخرى فلا تُمسّ قواعدها */
+  function rules(){
+    return "    // نظام دروب المالي: أعضاء القائمة duroobAccess/members فقط (يحدّثها النظام تلقائياً)\n"
+      +"    function isDuroobMember() {\n      return request.auth != null &&\n        exists(/databases/$(database)/documents/duroobAccess/members) &&\n        request.auth.token.email in get(/databases/$(database)/documents/duroobAccess/members).data.emails;\n    }\n"
+      +"    match /duroob/{doc=**} {\n      allow read, write: if isDuroobMember();\n    }\n"
+      +"    match /duroobAccess/{doc=**} {\n      allow read: if request.auth != null;\n      allow write: if isDuroobMember();\n    }\n"
+      +"    // ⚠️ وأضف \"duroob\", \"duroobAccess\" إلى قائمة الاستثناء في القاعدة العامة match /{col}/{doc=**}";
+  }
+  function panel(){
+    var s=(gv('SETTINGS2')||{}).sec||{}, acc=s.fbAccounts||{}, U=users().filter(function(x){ return x&&!x.disabled; });
+    var row=function(ok,t,d){ return '<tr><td style="width:26px;text-align:center">'+(ok?'✅':'⬜')+'</td><td style="font-weight:800;padding:5px">'+t+'</td><td style="color:#475569;padding:5px;font-size:12px">'+d+'</td></tr>'; };
+    var pwOk=U.every(function(x){ return x.pwh&&!x.p; }), noDef=!U.some(function(x){ return x.pwh&&verify('admin123',x.pwh); });
+    return '<div style="background:#fff;border-radius:12px;box-shadow:var(--shadow);padding:14px 16px;margin-bottom:12px;border-right:4px solid #1f3a7a">'
+      +'<div style="font-weight:900;color:#1f3a7a;font-size:15px;margin-bottom:6px">🔐 حالة الأمان</div><table style="width:100%;border-collapse:collapse;font-size:12.8px">'
+      +row(pwOk,'كلمات المرور مُجزّأة','لا توجد كلمة مرور نصية محفوظة في النظام أو السحابة')
+      +row(noDef,'لا كلمة مرور افتراضية','admin123 لم تعد تعمل لأي حساب')
+      +row(true,'قفل الحساب بعد 5 محاولات خاطئة','قفل 15 دقيقة + تسجيل كل محاولة في سجل التدقيق')
+      +row(true,'إغلاق الجلسة بعد 5 دقائق خمول','')
+      +row(!!tok,'الاتصال بقاعدة البيانات بحساب المستخدم',tok?'متصل برمز «'+esc(email||'')+'»':'غير متصل برمز — راجع الخطوة ١ أدناه')+row(locked(),'قاعدة البيانات مقفلة بقواعد الأمان',locked()?'لا قراءة ولا كتابة إلا لمستخدمي النظام':'لم تُنشر القواعد بعد — الخطوة ٢ أدناه')
+      +'</table></div>'
+      +'<div style="background:#fff;border-radius:12px;box-shadow:var(--shadow);padding:14px 16px;margin-bottom:12px;border-right:4px solid #c9a24a">'
+      +'<div style="font-weight:900;color:#1f3a7a;font-size:15px;margin-bottom:4px">🛡️ قفل قاعدة البيانات — الدخول التلقائي بحسابات Firebase</div>'
+      +'<div style="font-size:12.5px;color:#334155;line-height:1.9">يسجّل النظام كل مستخدم تلقائياً في Firebase عند دخوله (بريد <b>&lt;اسم المستخدم&gt;@duroob.app</b> وبنفس كلمة مروره) — لا تفعيل يدوي. المطلوب منك خطوتان في Firebase Console:</div>'
+      +'<ol style="font-size:12.5px;line-height:2;margin:6px 0;padding-inline-start:22px">'
+      +'<li>Authentication ← Sign-in method ← فعّل <b>Email/Password</b>. '+(s.provider==='on'?'<b style="color:#0a7c4e">✅ مفعّل</b>':s.provider==='off'?'<b style="color:#b91c1c">⛔ غير مفعّل بعد</b>':'<span style="color:#64748b">(لم يُتحقّق بعد — سجّل خروجك ودخولك)</span>')+'</li>'
+      +'<li>Firestore Database ← <b>Rules</b>: أضف المقطع أدناه داخل <code>match /databases/{database}/documents</code> مع بقية الأنظمة، وأضف "duroob", "duroobAccess" إلى استثناءات القاعدة العامة ← <b>Publish</b>. (لا يلزم انتظار دخول كل المستخدمين — قائمة الأعضاء يحدّثها النظام تلقائياً.) '+(locked()?'<b style="color:#0a7c4e">✅ قاعدة البيانات مقفلة</b>':'')+'</li></ol>'
+      +'<div style="font-size:12px;margin:6px 0">حسابات أُنشئت ('+Object.keys(acc).length+' من '+U.length+'): '+(U.map(function(x){ var mm=(s.fbMismatch||{})[x.u]; return (acc[x.u]&&!mm?'✅ ':mm?'⚠️ ':'⏳ ')+esc(x.u); }).join(' • ')||'—')+' <span style="color:#64748b">(⏳ = لم يدخل بعد • ⚠️ = كلمة مرور Firebase مختلفة)</span>'+'</div>'
+      +'<textarea id="sec-rules" readonly style="width:100%;height:190px;direction:ltr;font-family:monospace;font-size:11.5px;border:1px solid #cbd5e1;border-radius:8px;padding:8px">'+esc(rules())+'</textarea>'
+      +'<div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap"><button class="bc" onclick="var t=document.getElementById(\'sec-rules\');t.select();try{navigator.clipboard.writeText(t.value)}catch(e){document.execCommand(\'copy\')};toast&&toast(\'📋 نُسخت القواعد\')">📋 نسخ القواعد</button>'
+      +'<button class="bc" onclick="Sec.fb.syncMembers(true).then(function(ok){toast&&toast(ok?\'✅ حُدّثت قائمة الأعضاء\':\'⚠️ تعذّر التحديث — سجّل الدخول كمدير\')})">🔄 تحديث قائمة الأعضاء</button><span style="font-size:11.5px;color:#64748b;align-self:center">الأعضاء الحاليون: '+esc(memberEmails().join('، '))+'</span></div>'
+      +'<div style="font-size:11.5px;color:#92400e;background:#fffbeb;border-radius:8px;padding:8px;margin-top:8px;line-height:1.8">⚠️ إذا غيّر المدير كلمة مرور مستخدم آخر: احذف حساب ذلك المستخدم من Authentication ← Users، فيُنشأ من جديد بكلمة المرور الجديدة عند دخوله.</div></div>';
+  }
+  function enable(){
+    if(!confirm('🔐 تفعيل الدخول المحمي لقاعدة البيانات؟\n\nتأكد أولاً أنك فعّلت Email/Password في Firebase ← Authentication.\nبعد التفعيل سجّل خروجك ثم دخولك.')) return;
+    var s=gv('SETTINGS2'); s.sec=s.sec||{}; s.sec.fbAuth=true; s.sec.fbAt=new Date().toISOString(); s._mts=Date.now(); setOn(true); save();
+    log2('🔐 تفعيل حماية قاعدة البيانات',''); try{ if(global.acctTab) acctTab('security'); }catch(e){}
+  }
+  function signInOnly(u,pw){ return signIn(u,pw); }
+  return {syncMembers:syncMembers,memberEmails:memberEmails,locked:locked,setLocked:setLocked,signInOnly:signInOnly,reconnect:reconnect,onLogin:onLogin,changePw:changePw,rules:rules,panel:panel,enable:enable,mail:mail,on:on,token:function(){ return tok; }};
+})();
+
+/* اكتشاف قفل قاعدة البيانات (بعد نشر القواعد) — ليتم الدخول عبر Firebase أولاً على أي جهاز */
+setInterval(function(){ try{ if(global.__fbToken) return; var r=String(global._fbFailReason||'')+' '+String(global._lastRestError||''); if(/قواعد أمان|PERMISSION_DENIED|insufficient permissions/i.test(r)) FB.setLocked(true); }catch(e){} },3000);
+/* ═════════ التثبيت ═════════ */
+function hookPassFns(){
+  /* إضافة مستخدم: كلمة مرور قوية + تخزين مُجزّأ */
+  var a=global.addUser; if(typeof a==='function'&&!a.__sec){
+    var w=function(){ var p=($('nu-pass')||{}).value||'', u=($('nu-user')||{}).value||''; if(p){ var pe=policy(p,u); if(pe){ alert(pe); return; } }
+      var n0=users().length; var r=a.apply(this,arguments); var L=users(); if(L.length>n0){ var x=L[L.length-1]; if(x&&x.p!=null){ setPass(x,String(x.p)); x.mustChange=true; save(); } try{ FB.syncMembers(); }catch(e){} } return r; };
+    for(var k in a) try{ w[k]=a[k]; }catch(e){} w.__sec=true; global.addUser=w; }
+}
+function init(){ hookPassFns(); }
+init(); setTimeout(init,0); setTimeout(init,2600);
+global.Sec={hash:hashPw,verify:verify,policy:policy,setPass:setPass,check:check,afterLogin:afterLogin,changeMine:changeMine,forceChange:forceChange,
+  fb:FB,fbEnable:FB.enable,panel:function(){ return FB.panel(); },sha256:sha256};
 })(window);
 
 </script>
