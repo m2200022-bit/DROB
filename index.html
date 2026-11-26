@@ -21169,7 +21169,7 @@ function remoteLogin(u,p){
     FB.reconnect();
     var t0=Date.now(), iv=setInterval(function(){
       var usr=findUser(u);
-      if(usr&&usr.pwh){ clearInterval(iv); PENDING=false; var lu=$('lu'), lp=$('lp'); if(lu) lu.value=u; if(lp) lp.value=p; try{ doLogin(); }catch(e){} }
+      if(usr&&(usr.pwh||usr.p!=null||usr.ph)){ clearInterval(iv); PENDING=false; var lu=$('lu'), lp=$('lp'); if(lu) lu.value=u; if(lp) lp.value=p; try{ doLogin(); }catch(e){} }
       else if(Date.now()-t0>25000){ clearInterval(iv); PENDING=false; showErr('⚠️ تم التحقق من الحساب لكن تعذّر تحميل بيانات المستخدمين — أعد المحاولة'); }
     },700);
   }).catch(function(e){ PENDING=false; var L=lk(u); L.n=(L.n||0)+1; if(L.n>=MAXTRY){ L.until=Date.now()+LOCKMIN*60000; L.n=0; } lkSet(u,L);
@@ -21257,11 +21257,11 @@ var FB=(function(){
   function onLogin(cu,pw){
     if(!pw) return;
     if(!on()) return;
-    if(tok&&email===mail(cu.u)&&Date.now()<exp){ try{ var s3=gv('SETTINGS2'); s3.sec=s3.sec||{}; s3.sec.provider='on'; s3.sec.fbAccounts=s3.sec.fbAccounts||{}; s3.sec.fbAccounts[cu.u]=email; }catch(e){} setTimeout(function(){ syncMembers(); },3000); return; }
+    if(tok&&email===mail(cu.u)&&Date.now()<exp){ try{ var s3=gv('SETTINGS2'); s3.sec=s3.sec||{}; s3.sec.provider='on'; s3.sec.fbAccounts=s3.sec.fbAccounts||{}; s3.sec.fbAccounts[cu.u]=email; s3._mts=Date.now(); setTimeout(save,4000); }catch(e){} setTimeout(function(){ selfJoin(cu); syncMembers(); },3000); return; }
     signIn(cu.u,pw).then(function(r){
       try{ var s2=gv('SETTINGS2'); s2.sec=s2.sec||{}; s2.sec.fbAccounts=s2.sec.fbAccounts||{}; var had=s2.sec.fbAccounts[cu.u]; s2.sec.fbAccounts[cu.u]=email; s2.sec.provider='on'; if(s2.sec.fbMismatch) delete s2.sec.fbMismatch[cu.u]; if(!had){ s2._mts=Date.now(); setTimeout(save,4000); } }catch(e){}
       log2('🔐 دخول قاعدة البيانات المحمية',cu.u+(r==='created'?' — أُنشئ حساب Firebase تلقائياً':''));
-      reconnect(); setTimeout(function(){ syncMembers(); },3000);
+      reconnect(); setTimeout(function(){ selfJoin(cu); syncMembers(); },3000);
     }).catch(function(e){
       var m=String(e.message||e), s2=gv('SETTINGS2')||{}; s2.sec=s2.sec||{};
       if(/OPERATION_NOT_ALLOWED|CONFIGURATION_NOT_FOUND|ADMIN_ONLY_OPERATION|API_KEY|PROJECT_NOT_FOUND/.test(m)){ s2.sec.provider='off'; return; }   /* لم يُفعَّل Email/Password بعد — يستمر النظام كما كان */
@@ -21278,16 +21278,23 @@ var FB=(function(){
   }
   /* قائمة الأعضاء المسموح لهم — مستند duroobAccess/members (على نمط نظام طلبات الفعاليات)
      يحدّثها النظام تلقائياً عند دخول المدير أو إضافة مستخدم — فلا حاجة لتعديل القواعد عند إضافة مستخدم */
-  function memberEmails(){ return users().filter(function(x){ return x&&!x.disabled; }).map(function(x){ return mail(x.u); }).sort(); }
+  /* لا يُضاف إلى القائمة إلا من أنشأ حسابه بنفسه بعد التحقق من كلمة مروره في النظام (يمنع انتحال حساب لم يُنشأ بعد) */
+  function memberEmails(){ var acc=((gv('SETTINGS2')||{}).sec||{}).fbAccounts||{}; return users().filter(function(x){ return x&&!x.disabled&&acc[x.u]; }).map(function(x){ return mail(x.u); }).sort(); }
+  function membersUrl(){ return 'https://firestore.googleapis.com/v1/projects/'+cfg().projectId+'/databases/(default)/documents/duroobAccess/members?key='+cfg().apiKey; }
+  function readMembers(){ return fetch(membersUrl(),{headers:authH()}).then(function(r){ return r.ok?r.json():{}; }).then(function(j){ return ((((j.fields||{}).emails||{}).arrayValue||{}).values||[]).map(function(v){ return v.stringValue; }); }).catch(function(){ return null; }); }
+  function writeMembers(list,by){ var body={fields:{emails:{arrayValue:{values:list.map(function(e){ return {stringValue:e}; })}},updatedAt:{stringValue:new Date().toISOString()},by:{stringValue:String(by||'')}}};
+    return fetch(membersUrl(),{method:'PATCH',headers:Object.assign({'Content-Type':'application/json'},authH()),body:JSON.stringify(body)}).then(function(r){ return r.ok; }).catch(function(){ return false; }); }
+  /* بعد دخول ناجح (كلمة المرور تحققت محلياً): يضيف المستخدم بريده إلى القائمة إن لم يكن فيها */
+  function selfJoin(cu){ if(!tok) return; readMembers().then(function(have){ if(!have||have.indexOf(email)>-1) return; writeMembers(have.concat([email]).sort(),cu.name||cu.u).then(function(ok){ if(ok) log2('🔐 إضافة الحساب إلى أعضاء قاعدة البيانات',cu.u); }); }); }
   function syncMembers(force){
     var cu=gv('CU'); if(!tok||!cu||cu.role!=='admin') return Promise.resolve(false);
-    var url='https://firestore.googleapis.com/v1/projects/'+cfg().projectId+'/databases/(default)/documents/duroobAccess/members?key='+cfg().apiKey, want=memberEmails();
-    return fetch(url,{headers:authH()}).then(function(r){ return r.ok?r.json():{}; }).then(function(j){
-      var have=((((j.fields||{}).emails||{}).arrayValue||{}).values||[]).map(function(v){ return v.stringValue; }).sort();
-      if(!force&&have.join('|')===want.join('|')) return false;
-      var body={fields:{emails:{arrayValue:{values:want.map(function(e){ return {stringValue:e}; })}},updatedAt:{stringValue:new Date().toISOString()},by:{stringValue:String(cu.name||cu.u)}}};
-      return fetch(url,{method:'PATCH',headers:Object.assign({'Content-Type':'application/json'},authH()),body:JSON.stringify(body)}).then(function(r){ if(r.ok){ log2('🔐 تحديث قائمة أعضاء قاعدة البيانات',want.length+' مستخدم'); return true; } return false; });
-    }).catch(function(){ return false; });
+    var want=memberEmails(), disabled=users().filter(function(x){ return x&&x.disabled; }).map(function(x){ return mail(x.u); });
+    return readMembers().then(function(have){
+      if(have==null) return false;
+      var next=have.filter(function(e){ return disabled.indexOf(e)<0; }); want.forEach(function(e){ if(next.indexOf(e)<0) next.push(e); }); next.sort();
+      if(!force&&next.join('|')===have.slice().sort().join('|')) return false;
+      return writeMembers(next,cu.name||cu.u).then(function(ok){ if(ok) log2('🔐 تحديث قائمة أعضاء قاعدة البيانات',next.length+' مستخدم'); return ok; });
+    });
   }
   /* قواعد خاصة بمجموعتي النظام فقط — المشروع مشترك مع أنظمة أخرى فلا تُمسّ قواعدها */
   function rules(){
@@ -21314,7 +21321,7 @@ var FB=(function(){
       +'<div style="font-size:12.5px;color:#334155;line-height:1.9">يسجّل النظام كل مستخدم تلقائياً في Firebase عند دخوله (بريد <b>&lt;اسم المستخدم&gt;@duroob.app</b> وبنفس كلمة مروره) — لا تفعيل يدوي. المطلوب منك خطوتان في Firebase Console:</div>'
       +'<ol style="font-size:12.5px;line-height:2;margin:6px 0;padding-inline-start:22px">'
       +'<li>Authentication ← Sign-in method ← فعّل <b>Email/Password</b>. '+(s.provider==='on'?'<b style="color:#0a7c4e">✅ مفعّل</b>':s.provider==='off'?'<b style="color:#b91c1c">⛔ غير مفعّل بعد</b>':'<span style="color:#64748b">(لم يُتحقّق بعد — سجّل خروجك ودخولك)</span>')+'</li>'
-      +'<li>Firestore Database ← <b>Rules</b>: أضف المقطع أدناه داخل <code>match /databases/{database}/documents</code> مع بقية الأنظمة، وأضف "duroob", "duroobAccess" إلى استثناءات القاعدة العامة ← <b>Publish</b>. (لا يلزم انتظار دخول كل المستخدمين — قائمة الأعضاء يحدّثها النظام تلقائياً.) '+(locked()?'<b style="color:#0a7c4e">✅ قاعدة البيانات مقفلة</b>':'')+'</li></ol>'
+      +'<li>Firestore Database ← <b>Rules</b>: أضف المقطع أدناه داخل <code>match /databases/{database}/documents</code> مع بقية الأنظمة، وأضف "duroob", "duroobAccess" إلى استثناءات القاعدة العامة ← <b>Publish</b>. انشرها بعد أن تظهر ✅ أمام كل المستخدمين أدناه — كل من يدخل يُضاف إلى قائمة الأعضاء تلقائياً. '+(locked()?'<b style="color:#0a7c4e">✅ قاعدة البيانات مقفلة</b>':'')+'</li></ol>'
       +'<div style="font-size:12px;margin:6px 0">حسابات أُنشئت ('+Object.keys(acc).length+' من '+U.length+'): '+(U.map(function(x){ var mm=(s.fbMismatch||{})[x.u]; return (acc[x.u]&&!mm?'✅ ':mm?'⚠️ ':'⏳ ')+esc(x.u); }).join(' • ')||'—')+' <span style="color:#64748b">(⏳ = لم يدخل بعد • ⚠️ = كلمة مرور Firebase مختلفة)</span>'+'</div>'
       +'<textarea id="sec-rules" readonly style="width:100%;height:190px;direction:ltr;font-family:monospace;font-size:11.5px;border:1px solid #cbd5e1;border-radius:8px;padding:8px">'+esc(rules())+'</textarea>'
       +'<div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap"><button class="bc" onclick="var t=document.getElementById(\'sec-rules\');t.select();try{navigator.clipboard.writeText(t.value)}catch(e){document.execCommand(\'copy\')};toast&&toast(\'📋 نُسخت القواعد\')">📋 نسخ القواعد</button>'
